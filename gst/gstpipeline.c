@@ -81,6 +81,7 @@
 #include "gstinfo.h"
 #include "gstsystemclock.h"
 #include "gstutils.h"
+#include <gio/gio.h>
 
 GST_DEBUG_CATEGORY_STATIC (pipeline_debug);
 #define GST_CAT_DEFAULT pipeline_debug
@@ -101,7 +102,8 @@ enum
   PROP_0,
   PROP_DELAY,
   PROP_AUTO_FLUSH_BUS,
-  PROP_LATENCY
+  PROP_LATENCY,
+  PROP_RTP_SOCKET_CLOSE
 };
 
 #define GST_PIPELINE_GET_PRIVATE(obj)  \
@@ -195,6 +197,10 @@ gst_pipeline_class_init (GstPipelineClass * klass)
           "Latency to configure on the pipeline", 0, G_MAXUINT64,
           DEFAULT_LATENCY, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class, PROP_RTP_SOCKET_CLOSE,
+      g_param_spec_pointer ("rtp-socket-close", "RTP Socket",
+          "close the rtp-socket", G_PARAM_WRITABLE));
+
   gobject_class->dispose = gst_pipeline_dispose;
 
   gst_element_class_set_static_metadata (gstelement_class, "Pipeline object",
@@ -256,6 +262,7 @@ gst_pipeline_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
   GstPipeline *pipeline = GST_PIPELINE (object);
+  GSocket *rtp_socket_reuse;
 
   switch (prop_id) {
     case PROP_DELAY:
@@ -266,6 +273,11 @@ gst_pipeline_set_property (GObject * object, guint prop_id,
       break;
     case PROP_LATENCY:
       gst_pipeline_set_latency (pipeline, g_value_get_uint64 (value));
+      break;
+    case PROP_RTP_SOCKET_CLOSE:        //ru-bu
+      rtp_socket_reuse = g_value_get_pointer (value);
+      g_socket_close (rtp_socket_reuse, NULL);
+      g_object_unref (rtp_socket_reuse);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
