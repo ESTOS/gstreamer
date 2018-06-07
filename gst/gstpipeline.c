@@ -122,7 +122,6 @@ struct _GstPipelinePrivate
   GstClockTime latency;
 };
 
-
 static void gst_pipeline_dispose (GObject * object);
 static void gst_pipeline_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
@@ -604,6 +603,45 @@ gst_pipeline_handle_message (GstBin * bin, GstMessage * message)
         pipeline->priv->update_clock = TRUE;
       }
       GST_OBJECT_UNLOCK (bin);
+      break;
+    }
+    case GST_MESSAGE_ELEMENT:
+    {
+      //ru-bu SIX-1909
+      const GstStructure *s = gst_message_get_structure (message);
+      const gchar *name = gst_structure_get_name (s);
+      if (g_str_equal (name, "dtmf-event")) {
+        GstStructure *structure;
+        GstEvent *event;
+        gint maxduration = 800;
+        gint event_number;
+        gint event_volume;
+        gint event_type;
+        gint method;
+        const gchar *parent_name =
+            GST_OBJECT_NAME ((GST_OBJECT_PARENT (message->src)));
+
+        gst_structure_get_int (s, "number", &event_number);
+        gst_structure_get_int (s, "volume", &event_volume);
+        gst_structure_get_int (s, "type", &event_type);
+        gst_structure_get_int (s, "method", &method);
+
+        GST_DEBUG_OBJECT (bin, "Sending DTMF-EVENT Number %d", event_number);
+
+        structure = gst_structure_new ("dtmf-event", "type", G_TYPE_INT, 1, "number", G_TYPE_INT, (gint) event_number, "volume", G_TYPE_INT, (gint) event_volume, "start", G_TYPE_BOOLEAN, (gboolean) TRUE, "maxduration", G_TYPE_INT, (gint) maxduration,      //switch on+duration
+            "parentname", G_TYPE_STRING, parent_name,   //parent of the sender of the dtmf-event
+            NULL);
+
+        event = gst_event_new_custom (GST_EVENT_CUSTOM_UPSTREAM, structure);
+
+        if (gst_element_send_event (GST_ELEMENT_CAST (pipeline), event)) {
+          /* fine */
+        } else {
+          GST_ERROR_OBJECT (bin, "Sending DTMF-EVENT Number %d failed",
+              event_number);
+        }
+      }
+      break;
     }
     default:
       break;
@@ -662,7 +700,6 @@ gst_pipeline_do_latency (GstBin * bin)
     GST_WARNING_OBJECT (pipeline, "failed to query latency");
   }
   gst_query_unref (query);
-
 
   /* configure latency on elements */
   res =
@@ -772,7 +809,6 @@ gst_pipeline_get_pipeline_clock (GstPipeline * pipeline)
 
   return gst_pipeline_provide_clock_func (GST_ELEMENT_CAST (pipeline));
 }
-
 
 /**
  * gst_pipeline_use_clock:
