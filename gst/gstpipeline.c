@@ -637,8 +637,7 @@ gst_pipeline_handle_message (GstBin * bin, GstMessage * message)
         if (gst_element_send_event (GST_ELEMENT_CAST (pipeline), event)) {
           /* fine */
         } else {
-          GST_ERROR_OBJECT (bin, "Sending DTMF-EVENT Number %d failed",
-              event_number);
+          /* not fine */
         }
       }
       break;
