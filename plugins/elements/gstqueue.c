@@ -24,6 +24,7 @@
 
 /**
  * SECTION:element-queue
+ * @title: queue
  *
  * Data is queued until one of the limits specified by the
  * #GstQueue:max-size-buffers, #GstQueue:max-size-bytes and/or
@@ -120,16 +121,13 @@ enum
   PROP_MIN_THRESHOLD_TIME,
   PROP_LEAKY,
   PROP_SILENT,
-  PROP_FLUSH_ON_EOS,
-  PROP_GENERATE_BUFFER_LIST
+  PROP_FLUSH_ON_EOS
 };
 
 /* default property values */
 #define DEFAULT_MAX_SIZE_BUFFERS  200   /* 200 buffers */
 #define DEFAULT_MAX_SIZE_BYTES    (10 * 1024 * 1024)    /* 10 MB       */
 #define DEFAULT_MAX_SIZE_TIME     GST_SECOND    /* 1 second    */
-
-#define DEFAULT_GENERATE_BUFFER_LIST FALSE
 
 #define GST_QUEUE_MUTEX_LOCK(q) G_STMT_START {                          \
   g_mutex_lock (&q->qlock);                                              \
@@ -200,7 +198,7 @@ static GstFlowReturn gst_queue_chain (GstPad * pad, GstObject * parent,
     GstBuffer * buffer);
 static GstFlowReturn gst_queue_chain_list (GstPad * pad, GstObject * parent,
     GstBufferList * buffer_list);
-static GstFlowReturn gst_queue_push (GstQueue * queue);
+static GstFlowReturn gst_queue_push_one (GstQueue * queue);
 static void gst_queue_loop (GstPad * pad);
 
 static GstFlowReturn gst_queue_handle_sink_event (GstPad * pad,
@@ -252,31 +250,6 @@ queue_leaky_get_type (void)
 }
 
 static guint gst_queue_signals[LAST_SIGNAL] = { 0 };
-
-static gboolean
-gst_queue_post_message (GstElement * element, GstMessage * msg)
-{
-  GstQueue *queue = GST_QUEUE (element);
-  gboolean ret;
-
-  gst_message_ref (msg);
-  ret = GST_ELEMENT_CLASS (parent_class)->post_message (element, msg);
-
-  if (GST_MESSAGE_TYPE (msg) == GST_MESSAGE_STREAM_STATUS) {
-    GstStreamStatusType type;
-
-    gst_message_parse_stream_status (msg, &type, NULL);
-    if (type == GST_STREAM_STATUS_TYPE_CREATE) {
-      queue->schedule_task =
-          gst_task_get_scheduleable (GST_PAD_TASK (queue->srcpad));
-      GST_DEBUG_OBJECT (queue, "Scheduling task %d", queue->schedule_task);
-    }
-  }
-
-  gst_message_unref (msg);
-
-  return ret;
-}
 
 static void
 gst_queue_class_init (GstQueueClass * klass)
@@ -430,24 +403,7 @@ gst_queue_class_init (GstQueueClass * klass)
           G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING |
           G_PARAM_STATIC_STRINGS));
 
-  /**
-   * GstQueue:generate-buffer-list
-   *
-   * If this property is set to TRUE all buffers or buffer-list available
-   * in the queue are combined in a buffer-list before being pushed.
-   *
-   * Since: 1.6
-   */
-  g_object_class_install_property (gobject_class, PROP_GENERATE_BUFFER_LIST,
-      g_param_spec_boolean ("generate-buffer-list", "Generate buffer list",
-          "Combine queued buffers/buffer-list to push them in a single "
-          "buffer-list", DEFAULT_GENERATE_BUFFER_LIST,
-          G_PARAM_READWRITE | GST_PARAM_MUTABLE_PLAYING |
-          G_PARAM_STATIC_STRINGS));
-
   gobject_class->finalize = gst_queue_finalize;
-
-  gstelement_class->post_message = gst_queue_post_message;
 
   gst_element_class_set_static_metadata (gstelement_class,
       "Queue",
@@ -517,8 +473,6 @@ gst_queue_init (GstQueue * queue)
   queue->src_tainted = TRUE;
 
   queue->newseg_applied_to_src = FALSE;
-
-  queue->generate_buffer_list = DEFAULT_GENERATE_BUFFER_LIST;
 
   GST_DEBUG_OBJECT (queue,
       "initialized queue's not_empty & not_full conditions");
@@ -593,7 +547,8 @@ update_time_level (GstQueue * queue)
   GST_LOG_OBJECT (queue, "sink %" GST_STIME_FORMAT ", src %" GST_STIME_FORMAT,
       GST_STIME_ARGS (sink_time), GST_STIME_ARGS (src_time));
 
-  if (sink_time >= src_time)
+  if (GST_CLOCK_STIME_IS_VALID (src_time)
+      && GST_CLOCK_STIME_IS_VALID (sink_time) && sink_time >= src_time)
     queue->cur_level.time = sink_time - src_time;
   else
     queue->cur_level.time = 0;
@@ -791,22 +746,7 @@ gst_queue_locked_enqueue_buffer (GstQueue * queue, gpointer item)
   qitem.is_query = FALSE;
   qitem.size = bsize;
   gst_queue_array_push_tail_struct (queue->queue, &qitem);
-  if (queue->schedule_task)
-    gst_task_schedule (GST_PAD_TASK (queue->srcpad));
-  else
-    GST_QUEUE_SIGNAL_ADD (queue);
-}
-
-static gboolean
-buffer_list_calc_size (GstBuffer ** buf, guint idx, gpointer data)
-{
-  guint *p_size = data;
-  gsize buf_size;
-
-  buf_size = gst_buffer_get_size (*buf);
-  GST_TRACE ("buffer %u in has size %" G_GSIZE_FORMAT, idx, buf_size);
-  *p_size += buf_size;
-  return TRUE;
+  GST_QUEUE_SIGNAL_ADD (queue);
 }
 
 static inline void
@@ -814,9 +754,9 @@ gst_queue_locked_enqueue_buffer_list (GstQueue * queue, gpointer item)
 {
   GstQueueItem qitem;
   GstBufferList *buffer_list = GST_BUFFER_LIST_CAST (item);
-  gsize bsize = 0;
+  gsize bsize;
 
-  gst_buffer_list_foreach (buffer_list, buffer_list_calc_size, &bsize);
+  bsize = gst_buffer_list_calculate_size (buffer_list);
 
   /* add buffer to the statistics */
   queue->cur_level.buffers += gst_buffer_list_length (buffer_list);
@@ -828,11 +768,6 @@ gst_queue_locked_enqueue_buffer_list (GstQueue * queue, gpointer item)
   qitem.size = bsize;
   gst_queue_array_push_tail_struct (queue->queue, &qitem);
   GST_QUEUE_SIGNAL_ADD (queue);
-
-  if (queue->schedule_task)
-    gst_task_schedule (GST_PAD_TASK (queue->srcpad));
-  else
-    GST_QUEUE_SIGNAL_ADD (queue);
 }
 
 static inline void
@@ -876,22 +811,7 @@ gst_queue_locked_enqueue_event (GstQueue * queue, gpointer item)
   qitem.is_query = FALSE;
   qitem.size = 0;
   gst_queue_array_push_tail_struct (queue->queue, &qitem);
-
-  if (queue->schedule_task)
-    gst_task_schedule (GST_PAD_TASK (queue->srcpad));
-  else
-    GST_QUEUE_SIGNAL_ADD (queue);
-}
-
-static gboolean
-gst_queue_next_is_buffer (GstQueue * queue)
-{
-  GstQueueItem *qitem;
-
-  qitem = gst_queue_array_peek_head_struct (queue->queue);
-
-  return qitem && (GST_IS_BUFFER (qitem->item)
-      || GST_IS_BUFFER_LIST (qitem->item));
+  GST_QUEUE_SIGNAL_ADD (queue);
 }
 
 /* dequeue an item from the queue and update level stats, with QUEUE_LOCK */
@@ -991,9 +911,11 @@ gst_queue_handle_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
 
   queue = GST_QUEUE (parent);
 
+  GST_CAT_LOG_OBJECT (queue_dataflow, queue, "Received event '%s'",
+      GST_EVENT_TYPE_NAME (event));
+
   switch (GST_EVENT_TYPE (event)) {
     case GST_EVENT_FLUSH_START:
-      STATUS (queue, pad, "received flush start event");
       /* forward event */
       ret = gst_pad_push_event (queue->srcpad, event);
 
@@ -1001,10 +923,7 @@ gst_queue_handle_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
       GST_QUEUE_MUTEX_LOCK (queue);
       queue->srcresult = GST_FLOW_FLUSHING;
       /* unblock the loop and chain functions */
-      if (queue->schedule_task)
-        gst_task_schedule (GST_PAD_TASK (queue->srcpad));
-      else
-        GST_QUEUE_SIGNAL_ADD (queue);
+      GST_QUEUE_SIGNAL_ADD (queue);
       GST_QUEUE_SIGNAL_DEL (queue);
       GST_QUEUE_MUTEX_UNLOCK (queue);
 
@@ -1022,7 +941,6 @@ gst_queue_handle_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
       GST_QUEUE_MUTEX_UNLOCK (queue);
       break;
     case GST_EVENT_FLUSH_STOP:
-      STATUS (queue, pad, "received flush stop event");
       /* forward event */
       ret = gst_pad_push_event (queue->srcpad, event);
 
@@ -1046,6 +964,14 @@ gst_queue_handle_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
       if (GST_EVENT_IS_SERIALIZED (event)) {
         /* serialized events go in the queue */
         GST_QUEUE_MUTEX_LOCK (queue);
+
+        /* STREAM_START and SEGMENT reset the EOS status of a
+         * pad. Change the cached sinkpad flow result accordingly */
+        if (queue->srcresult == GST_FLOW_EOS
+            && (GST_EVENT_TYPE (event) == GST_EVENT_STREAM_START
+                || GST_EVENT_TYPE (event) == GST_EVENT_SEGMENT))
+          queue->srcresult = GST_FLOW_OK;
+
         if (queue->srcresult != GST_FLOW_OK) {
           /* Errors in sticky event pushing are no problem and ignored here
            * as they will cause more meaningful errors during data flow.
@@ -1059,19 +985,37 @@ gst_queue_handle_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
             if (queue->srcresult == GST_FLOW_NOT_LINKED
                 || queue->srcresult < GST_FLOW_EOS) {
               GST_QUEUE_MUTEX_UNLOCK (queue);
-              GST_ELEMENT_ERROR (queue, STREAM, FAILED,
-                  (_("Internal data flow error.")),
-                  ("streaming task paused, reason %s (%d)",
-                      gst_flow_get_name (queue->srcresult), queue->srcresult));
+              GST_ELEMENT_FLOW_ERROR (queue, queue->srcresult);
             } else {
               GST_QUEUE_MUTEX_UNLOCK (queue);
             }
             goto out_flow_error;
           }
         }
-        /* refuse more events on EOS */
-        if (queue->eos)
-          goto out_eos;
+
+        /* refuse more events on EOS unless they unset the EOS status */
+        if (queue->eos) {
+          switch (GST_EVENT_TYPE (event)) {
+            case GST_EVENT_STREAM_START:
+            case GST_EVENT_SEGMENT:
+              /* Restart the loop */
+              if (GST_PAD_MODE (queue->srcpad) == GST_PAD_MODE_PUSH) {
+                queue->srcresult = GST_FLOW_OK;
+                queue->eos = FALSE;
+                queue->unexpected = FALSE;
+                gst_pad_start_task (queue->srcpad,
+                    (GstTaskFunction) gst_queue_loop, queue->srcpad, NULL);
+              } else {
+                queue->eos = FALSE;
+                queue->unexpected = FALSE;
+              }
+
+              break;
+            default:
+              goto out_eos;
+          }
+        }
+
         gst_queue_locked_enqueue_event (queue, event);
         GST_QUEUE_MUTEX_UNLOCK (queue);
       } else {
@@ -1080,8 +1024,10 @@ gst_queue_handle_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
       }
       break;
   }
-  if (ret == FALSE)
+  if (ret == FALSE) {
+    GST_ERROR_OBJECT (queue, "Failed to push event");
     return GST_FLOW_ERROR;
+  }
   return GST_FLOW_OK;
 
   /* ERRORS */
@@ -1120,11 +1066,11 @@ gst_queue_handle_sink_query (GstPad * pad, GstObject * parent, GstQuery * query)
         qitem.is_query = TRUE;
         qitem.size = 0;
         gst_queue_array_push_tail_struct (queue->queue, &qitem);
-        if (queue->schedule_task)
-          gst_task_schedule (GST_PAD_TASK (queue->srcpad));
-        else
-          GST_QUEUE_SIGNAL_ADD (queue);
-        g_cond_wait (&queue->query_handled, &queue->qlock);
+        GST_QUEUE_SIGNAL_ADD (queue);
+        while (queue->srcresult == GST_FLOW_OK &&
+            queue->last_handled_query != query)
+          g_cond_wait (&queue->query_handled, &queue->qlock);
+        queue->last_handled_query = NULL;
         if (queue->srcresult != GST_FLOW_OK)
           goto out_flushing;
         res = queue->last_query;
@@ -1148,18 +1094,18 @@ out_flushing:
 static gboolean
 gst_queue_is_empty (GstQueue * queue)
 {
-  GstQueueItem *head;
+  GstQueueItem *tail;
 
-  head = gst_queue_array_peek_head_struct (queue->queue);
+  tail = gst_queue_array_peek_tail_struct (queue->queue);
 
-  if (head == NULL)
+  if (tail == NULL)
     return TRUE;
 
   /* Only consider the queue empty if the minimum thresholds
-   * are not reached and data is at the queue head. Otherwise
+   * are not reached and data is at the queue tail. Otherwise
    * we would block forever on serialized queries.
    */
-  if (!GST_IS_BUFFER (head->item) && !GST_IS_BUFFER_LIST (head->item))
+  if (!GST_IS_BUFFER (tail->item) && !GST_IS_BUFFER_LIST (tail->item))
     return FALSE;
 
   /* It is possible that a max size is reached before all min thresholds are.
@@ -1400,18 +1346,10 @@ gst_queue_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
       GST_MINI_OBJECT_CAST (buffer), FALSE);
 }
 
-static gboolean
-add_to_list (GstBuffer ** buffer, guint idx, gpointer data)
-{
-  gst_buffer_list_add (data, gst_buffer_ref (*buffer));
-
-  return TRUE;
-}
-
 /* dequeue an item from the queue an push it downstream. This functions returns
  * the result of the push. */
 static GstFlowReturn
-gst_queue_push (GstQueue * queue)
+gst_queue_push_one (GstQueue * queue)
 {
   GstFlowReturn result = queue->srcresult;
   GstMiniObject *data;
@@ -1425,40 +1363,6 @@ next:
   is_list = GST_IS_BUFFER_LIST (data);
 
   if (GST_IS_BUFFER (data) || is_list) {
-    if (queue->generate_buffer_list) {
-      /* Try to dequeue all buffers/buffer-list in the queue */
-
-      while (gst_queue_next_is_buffer (queue)) {
-        GstMiniObject *new_data = gst_queue_locked_dequeue (queue);
-        gboolean new_is_list = GST_IS_BUFFER_LIST (new_data);
-
-        if (!is_list) {
-          GstBufferList *list = gst_buffer_list_new ();
-
-          gst_buffer_list_add (list, GST_BUFFER_CAST (data));
-          data = GST_MINI_OBJECT_CAST (list);
-          is_list = TRUE;
-        } else {
-          GstBufferList *list = GST_BUFFER_LIST_CAST (data);
-
-          data = GST_MINI_OBJECT_CAST (gst_buffer_list_make_writable (list));
-        }
-
-        if (new_is_list) {
-          GstBufferList *list = GST_BUFFER_LIST_CAST (new_data);
-
-          GST_LOG_OBJECT (queue, "Adding %d buffers to be pushed",
-              gst_buffer_list_length (list));
-          gst_buffer_list_foreach (list, add_to_list, data);
-          gst_buffer_list_unref (list);
-        } else {
-          GST_LOG_OBJECT (queue, "Adding one buffer to be pushed");
-          gst_buffer_list_add (GST_BUFFER_LIST_CAST (data),
-              GST_BUFFER_CAST (new_data));
-        }
-      }
-    }
-
     if (!is_list) {
       GstBuffer *buffer;
 
@@ -1477,7 +1381,6 @@ next:
       }
 
       GST_QUEUE_MUTEX_UNLOCK (queue);
-      GST_LOG_OBJECT (queue, "Pushing buffer");
       result = gst_pad_push (queue->srcpad, buffer);
     } else {
       GstBufferList *buffer_list;
@@ -1491,8 +1394,6 @@ next:
       }
 
       GST_QUEUE_MUTEX_UNLOCK (queue);
-      GST_LOG_OBJECT (queue, "Pushing buffer list with %d buffers",
-          gst_buffer_list_length (buffer_list));
       result = gst_pad_push_list (queue->srcpad, buffer_list);
     }
 
@@ -1518,7 +1419,8 @@ next:
           GstEvent *event = GST_EVENT_CAST (data);
           GstEventType type = GST_EVENT_TYPE (event);
 
-          if (type == GST_EVENT_EOS || type == GST_EVENT_SEGMENT) {
+          if (type == GST_EVENT_EOS || type == GST_EVENT_SEGMENT
+              || type == GST_EVENT_STREAM_START) {
             /* we found a pushable item in the queue, push it out */
             GST_CAT_LOG_OBJECT (queue_dataflow, queue,
                 "pushing pushable event %s after EOS",
@@ -1567,6 +1469,7 @@ next:
     ret = gst_pad_peer_query (queue->srcpad, query);
     GST_QUEUE_MUTEX_LOCK_CHECK (queue, out_flushing_query);
     queue->last_query = ret;
+    queue->last_handled_query = query;
     g_cond_signal (&queue->query_handled);
     GST_CAT_LOG_OBJECT (queue_dataflow, queue,
         "did query %p, return %d", query, queue->last_query);
@@ -1576,21 +1479,25 @@ next:
   /* ERRORS */
 no_item:
   {
-    GST_CAT_LOG_OBJECT (queue_dataflow, queue,
+    GST_CAT_ERROR_OBJECT (queue_dataflow, queue,
         "exit because we have no item in the queue");
     return GST_FLOW_ERROR;
   }
 out_flushing:
   {
-    GST_CAT_LOG_OBJECT (queue_dataflow, queue, "exit because we are flushing");
-    return GST_FLOW_FLUSHING;
+    GstFlowReturn ret = queue->srcresult;
+    GST_CAT_LOG_OBJECT (queue_dataflow, queue,
+        "exit because task paused, reason: %s", gst_flow_get_name (ret));
+    return ret;
   }
 out_flushing_query:
   {
+    GstFlowReturn ret = queue->srcresult;
     queue->last_query = FALSE;
     g_cond_signal (&queue->query_handled);
-    GST_CAT_LOG_OBJECT (queue_dataflow, queue, "exit because we are flushing");
-    return GST_FLOW_FLUSHING;
+    GST_CAT_LOG_OBJECT (queue_dataflow, queue,
+        "exit because task paused, reason: %s", gst_flow_get_name (ret));
+    return ret;
   }
 }
 
@@ -1599,47 +1506,38 @@ gst_queue_loop (GstPad * pad)
 {
   GstQueue *queue;
   GstFlowReturn ret;
-  gboolean empty;
 
   queue = (GstQueue *) GST_PAD_PARENT (pad);
 
   /* have to lock for thread-safety */
   GST_QUEUE_MUTEX_LOCK_CHECK (queue, out_flushing);
 
-  if (queue->schedule_task) {
-    empty = gst_queue_is_empty (queue);
-    if (empty)
-      gst_task_unschedule (GST_PAD_TASK (pad));
-  } else {
-    while ((empty = gst_queue_is_empty (queue))) {
-      GST_CAT_DEBUG_OBJECT (queue_dataflow, queue, "queue is empty");
-      if (!queue->silent) {
-        GST_QUEUE_MUTEX_UNLOCK (queue);
-        g_signal_emit (queue, gst_queue_signals[SIGNAL_UNDERRUN], 0);
-        GST_QUEUE_MUTEX_LOCK_CHECK (queue, out_flushing);
-      }
+  while (gst_queue_is_empty (queue)) {
+    GST_CAT_DEBUG_OBJECT (queue_dataflow, queue, "queue is empty");
+    if (!queue->silent) {
+      GST_QUEUE_MUTEX_UNLOCK (queue);
+      g_signal_emit (queue, gst_queue_signals[SIGNAL_UNDERRUN], 0);
+      GST_QUEUE_MUTEX_LOCK_CHECK (queue, out_flushing);
+    }
 
-      /* we recheck, the signal could have changed the thresholds */
-      while ((empty = gst_queue_is_empty (queue))) {
-        GST_QUEUE_WAIT_ADD_CHECK (queue, out_flushing);
-      }
+    /* we recheck, the signal could have changed the thresholds */
+    while (gst_queue_is_empty (queue)) {
+      GST_QUEUE_WAIT_ADD_CHECK (queue, out_flushing);
+    }
 
-      GST_CAT_DEBUG_OBJECT (queue_dataflow, queue, "queue is not empty");
-      if (!queue->silent) {
-        GST_QUEUE_MUTEX_UNLOCK (queue);
-        g_signal_emit (queue, gst_queue_signals[SIGNAL_RUNNING], 0);
-        g_signal_emit (queue, gst_queue_signals[SIGNAL_PUSHING], 0);
-        GST_QUEUE_MUTEX_LOCK_CHECK (queue, out_flushing);
-      }
+    GST_CAT_DEBUG_OBJECT (queue_dataflow, queue, "queue is not empty");
+    if (!queue->silent) {
+      GST_QUEUE_MUTEX_UNLOCK (queue);
+      g_signal_emit (queue, gst_queue_signals[SIGNAL_RUNNING], 0);
+      g_signal_emit (queue, gst_queue_signals[SIGNAL_PUSHING], 0);
+      GST_QUEUE_MUTEX_LOCK_CHECK (queue, out_flushing);
     }
   }
 
-  if (!empty) {
-    ret = gst_queue_push (queue);
-    queue->srcresult = ret;
-    if (ret != GST_FLOW_OK)
-      goto out_flushing;
-  }
+  ret = gst_queue_push_one (queue);
+  queue->srcresult = ret;
+  if (ret != GST_FLOW_OK)
+    goto out_flushing;
 
   GST_QUEUE_MUTEX_UNLOCK (queue);
 
@@ -1665,10 +1563,7 @@ out_flushing:
     /* let app know about us giving up if upstream is not expected to do so */
     /* EOS is already taken care of elsewhere */
     if (eos && (ret == GST_FLOW_NOT_LINKED || ret < GST_FLOW_EOS)) {
-      GST_ELEMENT_ERROR (queue, STREAM, FAILED,
-          (_("Internal data flow error.")),
-          ("streaming task paused, reason %s (%d)",
-              gst_flow_get_name (ret), ret));
+      GST_ELEMENT_FLOW_ERROR (queue, ret);
       gst_pad_push_event (queue->srcpad, gst_event_new_eos ());
     }
     return;
@@ -1742,9 +1637,13 @@ gst_queue_handle_src_query (GstPad * pad, GstObject * parent, GstQuery * query)
       switch (format) {
         case GST_FORMAT_BYTES:
           peer_pos -= queue->cur_level.bytes;
+          if (peer_pos < 0)     /* Clamp result to 0 */
+            peer_pos = 0;
           break;
         case GST_FORMAT_TIME:
           peer_pos -= queue->cur_level.time;
+          if (peer_pos < 0)     /* Clamp result to 0 */
+            peer_pos = 0;
           break;
         default:
           GST_DEBUG_OBJECT (queue, "Can't adjust query in %s format, don't "
@@ -1861,6 +1760,10 @@ gst_queue_src_activate_mode (GstPad * pad, GstObject * parent, GstPadMode mode,
 
         /* step 2, make sure streaming finishes */
         result = gst_pad_stop_task (pad);
+
+        GST_QUEUE_MUTEX_LOCK (queue);
+        gst_queue_locked_flush (queue, FALSE);
+        GST_QUEUE_MUTEX_UNLOCK (queue);
       }
       break;
     default:
@@ -1937,9 +1840,6 @@ gst_queue_set_property (GObject * object,
     case PROP_FLUSH_ON_EOS:
       queue->flush_on_eos = g_value_get_boolean (value);
       break;
-    case PROP_GENERATE_BUFFER_LIST:
-      queue->generate_buffer_list = g_value_get_boolean (value);
-      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -1992,9 +1892,6 @@ gst_queue_get_property (GObject * object,
       break;
     case PROP_FLUSH_ON_EOS:
       g_value_set_boolean (value, queue->flush_on_eos);
-      break;
-    case PROP_GENERATE_BUFFER_LIST:
-      g_value_set_boolean (value, queue->generate_buffer_list);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);

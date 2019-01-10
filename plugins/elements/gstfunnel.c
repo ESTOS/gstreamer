@@ -5,7 +5,7 @@
  *  @author: Olivier Crete <olivier.crete@collabora.co.uk>
  * Copyright 2007 Nokia Corp.
  * Copyright 2016 Kurento (http://kurento.org/)
- *  @author: Miguel ParÃ­s <mparisdiaz@gmail.com>
+ *  @author: Miguel París <mparisdiaz@gmail.com>
  *
  * gstfunnel.c: Simple Funnel element
  *
@@ -26,6 +26,7 @@
 
 /**
  * SECTION:element-funnel
+ * @title: funnel
  *
  * Takes packets from various input sinks into one output source.
  *
@@ -95,7 +96,6 @@ struct _GstFunnelPad
   GstPad parent;
 
   gboolean got_eos;
-  GSList *events_sent;
 };
 
 struct _GstFunnelPadClass
@@ -116,21 +116,8 @@ enum
 };
 
 static void
-gst_funnel_pad_finalize (GObject * gobject)
-{
-  GstFunnelPad *pad = GST_FUNNEL_PAD_CAST (gobject);
-
-  g_slist_free_full (pad->events_sent, (GDestroyNotify) gst_event_unref);
-
-  G_OBJECT_CLASS (gst_funnel_pad_parent_class)->finalize (gobject);
-}
-
-static void
 gst_funnel_pad_class_init (GstFunnelPadClass * klass)
 {
-  GObjectClass *object_class = G_OBJECT_CLASS (klass);
-
-  object_class->finalize = gst_funnel_pad_finalize;
 }
 
 static void
@@ -171,22 +158,25 @@ static void
 gst_funnel_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
-  GstFunnel *funnel = GST_FUNNEL (object);
+  GstFunnel *funnel = GST_FUNNEL_CAST (object);
 
   switch (prop_id) {
     case PROP_FORWARD_STICKY_EVENTS:{
-      gboolean v = g_value_get_boolean (value);
-
-      GST_WARNING_OBJECT (funnel,
-          "'forward-stick-events' deprecated: use 'forward-stick-events-mode'");
+      funnel->forward_sticky_events = g_value_get_boolean (value);
 
       funnel->forward_sticky_events_mode =
-          v ? GST_FUNNEL_FORWARD_STICKY_EVENTS_MODE_ALWAYS :
+          funnel->forward_sticky_events ?
+          GST_FUNNEL_FORWARD_STICKY_EVENTS_MODE_ALWAYS :
           GST_FUNNEL_FORWARD_STICKY_EVENTS_MODE_NEVER;
       break;
     }
     case PROP_FORWARD_STICKY_EVENTS_MODE:
       funnel->forward_sticky_events_mode = g_value_get_enum (value);
+      if (funnel->forward_sticky_events_mode ==
+          GST_FUNNEL_FORWARD_STICKY_EVENTS_MODE_NEVER)
+        funnel->forward_sticky_events = FALSE;
+      else
+        funnel->forward_sticky_events = TRUE;
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -198,18 +188,12 @@ static void
 gst_funnel_get_property (GObject * object, guint prop_id, GValue * value,
     GParamSpec * pspec)
 {
-  GstFunnel *funnel = GST_FUNNEL (object);
+  GstFunnel *funnel = GST_FUNNEL_CAST (object);
 
   switch (prop_id) {
-    case PROP_FORWARD_STICKY_EVENTS:{
-      GST_WARNING_OBJECT (funnel,
-          "'forward-stick-events' deprecated: use 'forward-stick-events-mode'");
-
-      g_value_set_boolean (value,
-          funnel->forward_sticky_events_mode ==
-          GST_FUNNEL_FORWARD_STICKY_EVENTS_MODE_ALWAYS);
+    case PROP_FORWARD_STICKY_EVENTS:
+      g_value_set_boolean (value, funnel->forward_sticky_events);
       break;
-    }
     case PROP_FORWARD_STICKY_EVENTS_MODE:
       g_value_set_enum (value, funnel->forward_sticky_events_mode);
       break;
@@ -222,7 +206,7 @@ gst_funnel_get_property (GObject * object, guint prop_id, GValue * value,
 static void
 gst_funnel_dispose (GObject * object)
 {
-  GstFunnel *funnel = GST_FUNNEL (object);
+  GstFunnel *funnel = GST_FUNNEL_CAST (object);
   GList *item;
 
   gst_object_replace ((GstObject **) & funnel->last_sinkpad, NULL);
@@ -252,9 +236,9 @@ gst_funnel_class_init (GstFunnelClass * klass)
 
   g_object_class_install_property (gobject_class, PROP_FORWARD_STICKY_EVENTS,
       g_param_spec_boolean ("forward-sticky-events", "Forward sticky events",
-          "Forward sticky events on stream changes (DEPRECATED: use forward-sticky-events-mode)",
+          "Forward sticky events on stream changes",
           DEFAULT_FORWARD_STICKY_EVENTS,
-          G_PARAM_DEPRECATED | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
           GST_PARAM_MUTABLE_READY));
 
   g_object_class_install_property (gobject_class,
@@ -288,6 +272,7 @@ gst_funnel_init (GstFunnel * funnel)
 
   gst_element_add_pad (GST_ELEMENT (funnel), funnel->srcpad);
 
+  funnel->forward_sticky_events = DEFAULT_FORWARD_STICKY_EVENTS;
   funnel->forward_sticky_events_mode = DEFAULT_FORWARD_STICKY_EVENTS_MODE;
 }
 
@@ -351,7 +336,7 @@ done:
 static void
 gst_funnel_release_pad (GstElement * element, GstPad * pad)
 {
-  GstFunnel *funnel = GST_FUNNEL (element);
+  GstFunnel *funnel = GST_FUNNEL_CAST (element);
   GstFunnelPad *fpad = GST_FUNNEL_PAD_CAST (pad);
   gboolean got_eos;
   gboolean send_eos = FALSE;
@@ -377,42 +362,6 @@ gst_funnel_release_pad (GstElement * element, GstPad * pad)
 }
 
 static gboolean
-forward_event_on_stream_changed (GstFunnel * funnel, GstPad * sinkpad,
-    GstEvent * event)
-{
-  GstFunnelPad *funnelpad = GST_FUNNEL_PAD_CAST (sinkpad);
-  gboolean ret = TRUE;
-
-  if (funnel->last_sinkpad == NULL || funnel->forward_sticky_events_mode ==
-      GST_FUNNEL_FORWARD_STICKY_EVENTS_MODE_ALWAYS) {
-    GST_DEBUG_OBJECT (sinkpad, "Forwarding event %" GST_PTR_FORMAT, event);
-    ret = gst_pad_push_event (funnel->srcpad, gst_event_ref (event));
-  } else if ((funnel->forward_sticky_events_mode ==
-          GST_FUNNEL_FORWARD_STICKY_EVENTS_MODE_ONCE)
-      && (g_slist_find (funnelpad->events_sent, event) == NULL)) {
-    GST_DEBUG_OBJECT (sinkpad, "Forwarding event %" GST_PTR_FORMAT, event);
-    ret = gst_pad_push_event (funnel->srcpad, gst_event_ref (event));
-    funnelpad->events_sent =
-        g_slist_prepend (funnelpad->events_sent, gst_event_ref (event));
-  }
-
-  return ret;
-}
-
-static gboolean
-forward_events_on_stream_changed (GstPad * pad, GstEvent ** event,
-    gpointer user_data)
-{
-  GstFunnel *funnel = user_data;
-
-  if (GST_EVENT_TYPE (*event) != GST_EVENT_EOS) {
-    forward_event_on_stream_changed (funnel, pad, *event);
-  }
-
-  return TRUE;
-}
-
-static gboolean
 forward_events (GstPad * pad, GstEvent ** event, gpointer user_data)
 {
   GstPad *srcpad = user_data;
@@ -433,17 +382,13 @@ gst_funnel_sink_chain_object (GstPad * pad, GstFunnel * funnel,
 
   GST_PAD_STREAM_LOCK (funnel->srcpad);
 
-  if ((funnel->last_sinkpad == NULL)
-      || ((funnel->forward_sticky_events_mode !=
-              GST_FUNNEL_FORWARD_STICKY_EVENTS_MODE_NEVER)
+  if ((funnel->last_sinkpad == NULL) || (funnel->forward_sticky_events
           && (funnel->last_sinkpad != pad))) {
-
-    GST_DEBUG_OBJECT (pad, "Forwarding sticky events");
-    gst_pad_sticky_events_foreach (pad, forward_events_on_stream_changed,
-        funnel);
-
     gst_object_replace ((GstObject **) & funnel->last_sinkpad,
         GST_OBJECT (pad));
+
+    GST_DEBUG_OBJECT (pad, "Forwarding sticky events");
+    gst_pad_sticky_events_foreach (pad, forward_events, funnel->srcpad);
   }
 
   if (is_list)
@@ -463,7 +408,7 @@ static GstFlowReturn
 gst_funnel_sink_chain_list (GstPad * pad, GstObject * parent,
     GstBufferList * list)
 {
-  GstFunnel *funnel = GST_FUNNEL (parent);
+  GstFunnel *funnel = GST_FUNNEL_CAST (parent);
 
   return gst_funnel_sink_chain_object (pad, funnel, TRUE,
       GST_MINI_OBJECT_CAST (list));
@@ -472,7 +417,7 @@ gst_funnel_sink_chain_list (GstPad * pad, GstObject * parent,
 static GstFlowReturn
 gst_funnel_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
 {
-  GstFunnel *funnel = GST_FUNNEL (parent);
+  GstFunnel *funnel = GST_FUNNEL_CAST (parent);
 
   return gst_funnel_sink_chain_object (pad, funnel, FALSE,
       GST_MINI_OBJECT_CAST (buffer));
@@ -481,7 +426,7 @@ gst_funnel_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
 static gboolean
 gst_funnel_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
 {
-  GstFunnel *funnel = GST_FUNNEL (parent);
+  GstFunnel *funnel = GST_FUNNEL_CAST (parent);
   GstFunnelPad *fpad = GST_FUNNEL_PAD_CAST (pad);
   gboolean forward = TRUE;
   gboolean res = TRUE;
@@ -511,15 +456,23 @@ gst_funnel_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
     GST_OBJECT_LOCK (funnel);
     fpad->got_eos = FALSE;
     GST_OBJECT_UNLOCK (funnel);
-  } else if (GST_EVENT_TYPE (event) == GST_EVENT_GAP) {
-    /* If no data is coming and we receive GAP event, need to forward sticky events. */
-    unlock = TRUE;
-    GST_PAD_STREAM_LOCK (funnel->srcpad);
-    GST_OBJECT_LOCK (funnel);
-    gst_object_replace ((GstObject **) & funnel->last_sinkpad,
-        GST_OBJECT (pad));
-    GST_OBJECT_UNLOCK (funnel);
-    gst_pad_sticky_events_foreach (pad, forward_events, funnel->srcpad);
+  }
+
+  if (forward && GST_EVENT_IS_SERIALIZED (event)) {
+    /* If no data is coming and we receive serialized event, need to forward all sticky events.
+     * Otherwise downstream has an inconsistent set of sticky events when
+     * handling the new event. */
+    if (!unlock) {
+      unlock = TRUE;
+      GST_PAD_STREAM_LOCK (funnel->srcpad);
+    }
+
+    if ((funnel->last_sinkpad == NULL) || (funnel->forward_sticky_events
+            && (funnel->last_sinkpad != pad))) {
+      gst_object_replace ((GstObject **) & funnel->last_sinkpad,
+          GST_OBJECT (pad));
+      gst_pad_sticky_events_foreach (pad, forward_events, funnel->srcpad);
+    }
   }
 
   if (forward)
@@ -541,8 +494,6 @@ reset_pad (const GValue * data, gpointer user_data)
   GstFunnel *funnel = user_data;
 
   GST_OBJECT_LOCK (funnel);
-  g_slist_free_full (fpad->events_sent, (GDestroyNotify) gst_event_unref);
-  fpad->events_sent = NULL;
   fpad->got_eos = FALSE;
   GST_OBJECT_UNLOCK (funnel);
 }

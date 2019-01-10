@@ -1,7 +1,6 @@
 /* GStreamer
  * Copyright (C) 1999,2000 Erik Walthinsen <omega@cse.ogi.edu>
  *                    2005 Wim Taymans <wim@fluendo.com>
- *                    2015 Sebastian Dröge <sebastian@centricular.com>
  *
  * gsttask.c: Streaming tasks
  *
@@ -23,6 +22,7 @@
 
 /**
  * SECTION:gsttask
+ * @title: GstTask
  * @short_description: Abstraction of GStreamer streaming threads.
  * @see_also: #GstElement, #GstPad
  *
@@ -106,23 +106,6 @@ struct _GstTaskPrivate
   /* configured pool */
   GstTaskPool *pool;
 
-  /* If the creator of the task wants to schedule /
-   * unschedule the task instead of having it run
-   * all the time. Once this is TRUE, the pool can't
-   * be changed anymore!
-   *
-   * This can only be TRUE if the pool is not the
-   * default pool because we want explicit usage
-   * of this from the application by providing a
-   * custom task pool
-   */
-  gboolean scheduleable;
-  /* if the task should be scheduled again on the
-   * next opportunity. Defaults to TRUE until
-   * unschedule is called
-   */
-  gboolean should_schedule;
-
   /* remember the pool and id that is currently running. */
   gpointer id;
   GstTaskPool *pool_id;
@@ -152,7 +135,7 @@ SetThreadName (DWORD dwThreadID, LPCSTR szThreadName)
 
   __try {
     RaiseException (0x406D1388, 0, sizeof (info) / sizeof (DWORD),
-        (DWORD *) & info);
+        (const ULONG_PTR *) &info);
   }
   __except (EXCEPTION_CONTINUE_EXECUTION) {
   }
@@ -162,7 +145,8 @@ SetThreadName (DWORD dwThreadID, LPCSTR szThreadName)
 static void gst_task_finalize (GObject * object);
 
 static void gst_task_func (GstTask * task);
-static gboolean start_task (GstTask * task);
+
+static GMutex pool_lock;
 
 #define _do_init \
 { \
@@ -170,6 +154,21 @@ static gboolean start_task (GstTask * task);
 }
 
 G_DEFINE_TYPE_WITH_CODE (GstTask, gst_task, GST_TYPE_OBJECT, _do_init);
+
+static void
+init_klass_pool (GstTaskClass * klass)
+{
+  g_mutex_lock (&pool_lock);
+  if (klass->pool) {
+    gst_task_pool_cleanup (klass->pool);
+    gst_object_unref (klass->pool);
+  }
+  klass->pool = gst_task_pool_new ();
+  /* Classes are never destroyed so this ref will never be dropped */
+  GST_OBJECT_FLAG_SET (klass->pool, GST_OBJECT_FLAG_MAY_BE_LEAKED);
+  gst_task_pool_prepare (klass->pool, NULL);
+  g_mutex_unlock (&pool_lock);
+}
 
 static void
 gst_task_class_init (GstTaskClass * klass)
@@ -182,7 +181,7 @@ gst_task_class_init (GstTaskClass * klass)
 
   gobject_class->finalize = gst_task_finalize;
 
-  klass->pool = gst_task_pool_get_default ();
+  init_klass_pool (klass);
 }
 
 static void
@@ -199,13 +198,11 @@ gst_task_init (GstTask * task)
   g_cond_init (&task->cond);
   SET_TASK_STATE (task, GST_TASK_STOPPED);
 
+  /* use the default klass pool for this task, users can
+   * override this later */
+  g_mutex_lock (&pool_lock);
   task->priv->pool = gst_object_ref (klass->pool);
-
-  task->priv->scheduleable = FALSE;
-  task->priv->should_schedule = TRUE;
-
-  /* clear floating flag */
-  gst_object_ref_sink (task);
+  g_mutex_unlock (&pool_lock);
 }
 
 static void
@@ -293,8 +290,7 @@ gst_task_func (GstTask * task)
    * mark our state running so that nobody can mess with
    * the mutex. */
   GST_OBJECT_LOCK (task);
-  if (GET_TASK_STATE (task) == GST_TASK_STOPPED ||
-      (priv->scheduleable && GET_TASK_STATE (task) == GST_TASK_PAUSED))
+  if (GET_TASK_STATE (task) == GST_TASK_STOPPED)
     goto exit;
   lock = GST_TASK_GET_LOCK (task);
   if (G_UNLIKELY (lock == NULL))
@@ -303,7 +299,7 @@ gst_task_func (GstTask * task)
   GST_OBJECT_UNLOCK (task);
 
   /* fire the enter_func callback when we need to */
-  if (!priv->scheduleable && priv->enter_func)
+  if (priv->enter_func)
     priv->enter_func (task, tself, priv->enter_user_data);
 
   /* locking order is TASK_LOCK, LOCK */
@@ -313,15 +309,7 @@ gst_task_func (GstTask * task)
 
   while (G_LIKELY (GET_TASK_STATE (task) != GST_TASK_STOPPED)) {
     GST_OBJECT_LOCK (task);
-
-    if (G_UNLIKELY (priv->scheduleable
-            && GST_TASK_STATE (task) == GST_TASK_PAUSED)) {
-      GST_OBJECT_UNLOCK (task);
-      break;
-    }
-
-    while (G_UNLIKELY (!priv->scheduleable
-            && GST_TASK_STATE (task) == GST_TASK_PAUSED)) {
+    while (G_UNLIKELY (GST_TASK_STATE (task) == GST_TASK_PAUSED)) {
       g_rec_mutex_unlock (lock);
 
       GST_TASK_SIGNAL (task);
@@ -342,9 +330,6 @@ gst_task_func (GstTask * task)
     }
 
     task->func (task->user_data);
-
-    if (priv->scheduleable)
-      break;
   }
 
   g_rec_mutex_unlock (lock);
@@ -353,27 +338,21 @@ gst_task_func (GstTask * task)
   task->thread = NULL;
 
 exit:
-  if (!priv->scheduleable && priv->leave_func) {
+  if (priv->leave_func) {
     /* fire the leave_func callback when we need to. We need to do this before
      * we signal the task and with the task lock released. */
     GST_OBJECT_UNLOCK (task);
     priv->leave_func (task, tself, priv->leave_user_data);
     GST_OBJECT_LOCK (task);
   }
-
-  if (priv->scheduleable && priv->should_schedule
-      && GET_TASK_STATE (task) == GST_TASK_STARTED) {
-    start_task (task);
-  } else {
-    /* now we allow messing with the lock again by setting the running flag to
-     * %FALSE. Together with the SIGNAL this is the sign for the _join() to
-     * complete.
-     * Note that we still have not dropped the final ref on the task. We could
-     * check here if there is a pending join() going on and drop the last ref
-     * before releasing the lock as we can be sure that a ref is held by the
-     * caller of the join(). */
-    task->running = FALSE;
-  }
+  /* now we allow messing with the lock again by setting the running flag to
+   * %FALSE. Together with the SIGNAL this is the sign for the _join() to
+   * complete.
+   * Note that we still have not dropped the final ref on the task. We could
+   * check here if there is a pending join() going on and drop the last ref
+   * before releasing the lock as we can be sure that a ref is held by the
+   * caller of the join(). */
+  task->running = FALSE;
   GST_TASK_SIGNAL (task);
   GST_OBJECT_UNLOCK (task);
 
@@ -403,9 +382,11 @@ gst_task_cleanup_all (void)
   GstTaskClass *klass;
 
   if ((klass = g_type_class_peek (GST_TYPE_TASK))) {
-    gst_task_pool_cleanup (klass->pool);
-    gst_task_pool_prepare (klass->pool, NULL);
+    init_klass_pool (klass);
   }
+
+  /* GstElement owns a GThreadPool */
+  _priv_gst_element_cleanup ();
 }
 
 /**
@@ -439,12 +420,15 @@ gst_task_new (GstTaskFunction func, gpointer user_data, GDestroyNotify notify)
 
   g_return_val_if_fail (func != NULL, NULL);
 
-  task = g_object_newv (GST_TYPE_TASK, 0, NULL);
+  task = g_object_new (GST_TYPE_TASK, NULL);
   task->func = func;
   task->user_data = user_data;
   task->notify = notify;
 
   GST_DEBUG ("Created task %p", task);
+
+  /* clear floating flag */
+  gst_object_ref_sink (task);
 
   return task;
 }
@@ -526,7 +510,7 @@ gst_task_get_pool (GstTask * task)
 void
 gst_task_set_pool (GstTask * task, GstTaskPool * pool)
 {
-  GstTaskPool *old = NULL;
+  GstTaskPool *old;
   GstTaskPrivate *priv;
 
   g_return_if_fail (GST_IS_TASK (task));
@@ -536,14 +520,10 @@ gst_task_set_pool (GstTask * task, GstTaskPool * pool)
 
   GST_OBJECT_LOCK (task);
   if (priv->pool != pool) {
-    if (priv->scheduleable) {
-      g_warning ("%s: Changing pool not possible for scheduleable tasks",
-          GST_OBJECT_NAME (task));
-    } else {
-      old = priv->pool;
-      priv->pool = gst_object_ref (pool);
-    }
-  }
+    old = priv->pool;
+    priv->pool = gst_object_ref (pool);
+  } else
+    old = NULL;
   GST_OBJECT_UNLOCK (task);
 
   if (old)
@@ -659,8 +639,6 @@ start_task (GstTask * task)
 
   priv = task->priv;
 
-  GST_DEBUG_OBJECT (task, "Starting task");
-
   /* new task, We ref before so that it remains alive while
    * the thread is running. */
   gst_object_ref (task);
@@ -668,8 +646,6 @@ start_task (GstTask * task)
    * and exit the task function. */
   task->running = TRUE;
 
-  if (priv->pool_id)
-    gst_object_unref (priv->pool_id);
   /* push on the thread pool, we remember the original pool because the user
    * could change it later on and then we join to the wrong pool. */
   priv->pool_id = gst_object_ref (priv->pool);
@@ -720,14 +696,11 @@ gst_task_set_state (GstTask * task, GstTaskState state)
   old = GET_TASK_STATE (task);
   if (old != state) {
     SET_TASK_STATE (task, state);
-
     switch (old) {
       case GST_TASK_STOPPED:
         /* If the task already has a thread scheduled we don't have to do
          * anything. */
-        if (G_UNLIKELY (!task->running) &&
-            (!task->priv->scheduleable || (task->priv->should_schedule
-                    && state == GST_TASK_STARTED)))
+        if (G_UNLIKELY (!task->running))
           res = start_task (task);
         break;
       case GST_TASK_PAUSED:
@@ -884,59 +857,4 @@ joining_self:
         "schedule the state change from the main thread.\n", task);
     return FALSE;
   }
-}
-
-gboolean
-gst_task_get_scheduleable (GstTask * task)
-{
-  g_return_val_if_fail (GST_IS_TASK (task), FALSE);
-
-  return task->priv->scheduleable;
-}
-
-gboolean
-gst_task_set_scheduleable (GstTask * task, gboolean scheduleable)
-{
-  GstTaskClass *klass;
-
-  g_return_val_if_fail (GST_IS_TASK (task), FALSE);
-
-  klass = GST_TASK_GET_CLASS (task);
-  GST_OBJECT_LOCK (task);
-  if (task->priv->pool == klass->pool) {
-    GST_OBJECT_UNLOCK (task);
-    return FALSE;
-  }
-
-  task->priv->scheduleable = scheduleable;
-  GST_OBJECT_UNLOCK (task);
-
-  return scheduleable;
-}
-
-void
-gst_task_schedule (GstTask * task)
-{
-  g_return_if_fail (GST_IS_TASK (task));
-
-  GST_OBJECT_LOCK (task);
-  GST_DEBUG_OBJECT (task, "Scheduling task");
-  if (!task->running && task->priv->scheduleable
-      && GET_TASK_STATE (task) == GST_TASK_STARTED) {
-    GST_DEBUG_OBJECT (task, "Task needs to be scheduled");
-    task->priv->should_schedule = TRUE;
-    start_task (task);
-  }
-  GST_OBJECT_UNLOCK (task);
-}
-
-void
-gst_task_unschedule (GstTask * task)
-{
-  g_return_if_fail (GST_IS_TASK (task));
-
-  GST_OBJECT_LOCK (task);
-  GST_DEBUG_OBJECT (task, "Unscheduling task");
-  task->priv->should_schedule = FALSE;
-  GST_OBJECT_UNLOCK (task);
 }
