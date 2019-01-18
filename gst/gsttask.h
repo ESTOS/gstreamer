@@ -210,10 +210,14 @@ gboolean        gst_task_pause          (GstTask *task);
 GST_API
 gboolean        gst_task_join           (GstTask *task);
 
+GST_API
 gboolean        gst_task_get_scheduleable(GstTask *task);
+GST_API
 gboolean        gst_task_set_scheduleable(GstTask *task, gboolean scheduleable);
 
+GST_API
 void            gst_task_schedule       (GstTask *task);
+GST_API
 void            gst_task_unschedule     (GstTask *task);
 
 #ifdef G_DEFINE_AUTOPTR_CLEANUP_FUNC

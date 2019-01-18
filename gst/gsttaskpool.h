@@ -37,6 +37,7 @@ G_BEGIN_DECLS
 
 typedef struct _GstTaskPool GstTaskPool;
 typedef struct _GstTaskPoolClass GstTaskPoolClass;
+typedef struct _GstTaskPoolPrivate GstTaskPoolPrivate;
 
 /**
  * GstTaskPoolFunction:
@@ -57,7 +58,8 @@ struct _GstTaskPool {
   /*< private >*/
   GThreadPool   *pool;
 
-  gpointer _gst_reserved[GST_PADDING];
+  GstTaskPoolPrivate *priv;
+  gpointer _gst_reserved[GST_PADDING-1];
 };
 
 /**
@@ -90,7 +92,8 @@ GType           gst_task_pool_get_type    (void);
 
 GST_API
 GstTaskPool *   gst_task_pool_new         (void);
-
+GST_API
+GstTaskPool *   gst_task_pool_new_full    (gint max_threads, gboolean exclusive);
 GST_API
 void            gst_task_pool_prepare     (GstTaskPool *pool, GError **error);
 
@@ -99,9 +102,14 @@ gpointer        gst_task_pool_push        (GstTaskPool *pool, GstTaskPoolFunctio
                                            gpointer user_data, GError **error);
 GST_API
 void            gst_task_pool_join        (GstTaskPool *pool, gpointer id);
-
 GST_API
-void		gst_task_pool_cleanup     (GstTaskPool *pool);
+void            gst_task_pool_cleanup     (GstTaskPool *pool);
+GST_API
+GstTaskPool *   gst_task_pool_get_default (void);
+GST_API
+gboolean        gst_task_pool_need_schedule_thread (GstTaskPool *pool, gboolean needed);
+GST_API
+GMainContext *  gst_task_pool_get_schedule_context (GstTaskPool *pool);
 
 #ifdef G_DEFINE_AUTOPTR_CLEANUP_FUNC
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstTaskPool, gst_object_unref)
