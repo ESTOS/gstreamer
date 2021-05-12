@@ -2268,8 +2268,9 @@ gst_base_src_do_sync (GstBaseSrc * basesrc, GstBuffer * buffer)
 
     GST_LOG_OBJECT (basesrc,
         "startup PTS: %" GST_TIME_FORMAT ", DTS %" GST_TIME_FORMAT
-        ", running_time %" GST_TIME_FORMAT, GST_TIME_ARGS (pts),
-        GST_TIME_ARGS (dts), GST_TIME_ARGS (running_time));
+        ", running_time %" GST_TIME_FORMAT ", base_time %" GST_TIME_FORMAT,
+        GST_TIME_ARGS (pts), GST_TIME_ARGS (dts), GST_TIME_ARGS (running_time),
+        GST_TIME_ARGS (base_time));
 
     if (pseudo_live && timestamp != -1) {
       /* live source and we need to sync, add startup latency to all timestamps
