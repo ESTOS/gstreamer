@@ -90,6 +90,12 @@
 
 #define DEBUG_REFCOUNT
 
+#ifdef G_OS_WIN32
+#define G_OS_WIN32_ROLFIDEBUG
+#include <windows.h>
+//#include <process.h>
+#endif
+
 /* Object signals and args */
 enum
 {
@@ -233,8 +239,20 @@ gst_object_ref (gpointer object)
 
   GST_TRACER_OBJECT_REFFED (object, ((GObject *) object)->ref_count + 1);
 #ifdef DEBUG_REFCOUNT
+#ifdef G_OS_WIN32_ROLFIDEBUG
+  {
+    void *stack[10];
+    CaptureStackBackTrace (0, 10, stack, NULL);
+    GST_CAT_TRACE_OBJECT (GST_CAT_REFCOUNTING, object,
+        "%p ref %d->%d %p %p %p %p %p %p %p %p %p", object,
+        ((GObject *) object)->ref_count, ((GObject *) object)->ref_count + 1,
+        stack[1], stack[2], stack[3], stack[4], stack[5], stack[6], stack[7],
+        stack[8], stack[9]);
+  }
+#else
   GST_CAT_TRACE_OBJECT (GST_CAT_REFCOUNTING, object, "%p ref %d->%d", object,
       ((GObject *) object)->ref_count, ((GObject *) object)->ref_count + 1);
+#endif
 #endif
   g_object_ref (object);
 
@@ -260,9 +278,22 @@ gst_object_unref (gpointer object)
 
   GST_TRACER_OBJECT_UNREFFED (object, ((GObject *) object)->ref_count - 1);
 #ifdef DEBUG_REFCOUNT
+#ifdef G_OS_WIN32_ROLFIDEBUG
+  {
+    void *stack[5];
+    CaptureStackBackTrace (0, 5, stack, NULL);
+    GST_CAT_TRACE_OBJECT (GST_CAT_REFCOUNTING, object,
+        "%p unref %d->%d %p %p %p %p %p %p %p %p %p", object,
+        ((GObject *) object)->ref_count, ((GObject *) object)->ref_count - 1,
+        stack[1], stack[2], stack[3], stack[4], stack[5], stack[6], stack[7],
+        stack[8], stack[9]);
+  }
+#else
   GST_CAT_TRACE_OBJECT (GST_CAT_REFCOUNTING, object, "%p unref %d->%d", object,
       ((GObject *) object)->ref_count, ((GObject *) object)->ref_count - 1);
 #endif
+#endif
+
   g_object_unref (object);
 }
 
@@ -288,10 +319,23 @@ gst_object_ref_sink (gpointer object)
   g_return_val_if_fail (object != NULL, NULL);
 
 #ifdef DEBUG_REFCOUNT
+#ifdef G_OS_WIN32_ROLFIDEBUG
+  {
+    void *stack[5];
+    CaptureStackBackTrace (0, 5, stack, NULL);
+    GST_CAT_TRACE_OBJECT (GST_CAT_REFCOUNTING, object,
+        "%p ref_sink %d->%d %p %p %p %p %p %p %p %p %p", object,
+        ((GObject *) object)->ref_count, ((GObject *) object)->ref_count + 1,
+        stack[1], stack[2], stack[3], stack[4], stack[5], stack[6], stack[7],
+        stack[8], stack[9]);
+  }
+#else
   GST_CAT_TRACE_OBJECT (GST_CAT_REFCOUNTING, object, "%p ref_sink %d->%d",
       object, ((GObject *) object)->ref_count,
       ((GObject *) object)->ref_count + 1);
 #endif
+#endif
+
   return g_object_ref_sink (object);
 }
 
