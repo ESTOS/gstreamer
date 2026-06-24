@@ -141,6 +141,12 @@ gst_rtp_dtmf_mux_accept_buffer_locked (GstRTPMux * rtp_mux,
         GST_LOG_OBJECT (mux, "Dropping buffer %p because running time"
             " %" GST_TIME_FORMAT " < %" GST_TIME_FORMAT, rtpbuffer->buffer,
             GST_TIME_ARGS (running_ts), GST_TIME_ARGS (mux->last_priority_end));
+
+        if ((mux->last_priority_end - running_ts) > 600000000) {
+          mux->last_priority_end = running_ts + 533000000;
+          GST_LOG_OBJECT (mux, "Setting droptime to %" GST_TIME_FORMAT,
+              GST_TIME_ARGS (mux->last_priority_end));
+        }
         return FALSE;
       }
     }

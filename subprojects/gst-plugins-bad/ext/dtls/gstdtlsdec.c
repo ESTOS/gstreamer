@@ -500,6 +500,9 @@ process_buffer (GstDtlsDec * self, GstBuffer * buffer)
     return GST_FLOW_ERROR;
   }
 
+  if (map_info.data != 0 && map_info.size != 0)
+    GST_MEMDUMP_OBJECT (self, "dtlsrx", map_info.data, map_info.size);
+
   flow_ret =
       gst_dtls_connection_process (self->connection, map_info.data,
       map_info.size, &written, &err);

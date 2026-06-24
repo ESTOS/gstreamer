@@ -1320,6 +1320,7 @@ gst_srtp_dec_decode_buffer (GstSrtpDec * filter, GstPad * pad, GstBuffer ** buf,
   srtp_err_status_t err;
   gint size;
   GstSrtpDecSsrcStream *stream;
+  guint32 roc_try_counter = 0;
 
   g_return_val_if_fail (GST_IS_BUFFER (*buf), FALSE);
 
@@ -1384,6 +1385,13 @@ unprotect:
       goto unprotect;
     }
     case srtp_err_status_auth_fail:
+      //(30days*24h*60min)/20min per ro = 2160
+      if (roc_try_counter++ < 2160) {
+        GST_OBJECT_LOCK (filter);
+        GST_WARNING_OBJECT (filter, "ROC:%d", roc_try_counter);
+        srtp_set_stream_roc (filter->session, ssrc, roc_try_counter);
+        goto unprotect;
+      }
       GST_WARNING_OBJECT (filter, "Error authentication packet, dropping");
       stream->recv_drop_count++;
       goto err;

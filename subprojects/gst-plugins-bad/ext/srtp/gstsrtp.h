@@ -57,6 +57,7 @@
 #include <srtp2/srtp.h>
 #include <srtp2/crypto_types.h>
 
+void     gst_srtp_init_library           (void);
 void     gst_srtp_init_event_reporter    (void);
 gboolean gst_srtp_get_soft_limit_reached (void);
 

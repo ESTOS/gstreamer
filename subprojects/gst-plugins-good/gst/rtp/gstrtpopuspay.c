@@ -341,6 +341,12 @@ gst_rtp_opus_pay_handle_buffer (GstRTPBasePayload * basepayload,
   pts = GST_BUFFER_PTS (buffer);
   dts = GST_BUFFER_DTS (buffer);
   duration = GST_BUFFER_DURATION (buffer);
+  
+  GST_CAT_LEVEL_LOG (GST_CAT_DEFAULT, GST_LEVEL_MEMDUMP, basepayload,
+      "DTS: %" GST_TIME_FORMAT
+      " PTS: %" GST_TIME_FORMAT
+      " Duration: %" GST_TIME_FORMAT,
+      GST_TIME_ARGS (dts), GST_TIME_ARGS (pts), GST_TIME_ARGS (duration));
 
   outbuf = gst_rtp_base_payload_allocate_output_buffer (basepayload, 0, 0, 0);
 

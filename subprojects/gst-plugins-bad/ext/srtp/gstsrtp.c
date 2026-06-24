@@ -31,6 +31,10 @@
 #include "gstsrtpenc.h"
 #include "gstsrtpdec.h"
 
+GST_DEBUG_CATEGORY_STATIC (gst_srtp_debug);
+#define GST_CAT_DEFAULT gst_srtp_debug
+
+static void log_handler (srtp_log_level_t level, const char *msg, void *data);
 static void free_reporter_data (gpointer data);
 
 GPrivate current_callback = G_PRIVATE_INIT (free_reporter_data);
@@ -266,4 +270,38 @@ cipher_key_size (GstSrtpCipherType cipher)
   }
 
   return size;
+}
+
+void
+gst_srtp_init_library (void)
+{
+  static gsize res = FALSE;
+
+  if (g_once_init_enter (&res)) {
+    GST_DEBUG_CATEGORY_INIT (gst_srtp_debug, "srtp", 0, "libsrtp");
+    srtp_init ();
+    srtp_install_log_handler (log_handler, NULL);
+    g_once_init_leave (&res, TRUE);
+  }
+}
+
+static void
+log_handler (srtp_log_level_t level, const char *msg, void *data)
+{
+  char level_char = '?';
+  switch (level) {
+    case srtp_log_level_error:
+      level_char = 'e';
+      break;
+    case srtp_log_level_warning:
+      level_char = 'w';
+      break;
+    case srtp_log_level_info:
+      level_char = 'i';
+      break;
+    case srtp_log_level_debug:
+      level_char = 'd';
+      break;
+  }
+  GST_DEBUG ("Level[%c]: %s", level_char, msg);
 }

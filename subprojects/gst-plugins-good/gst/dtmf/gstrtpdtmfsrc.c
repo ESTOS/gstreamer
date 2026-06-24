@@ -119,7 +119,8 @@ enum
   PROP_CLOCK_RATE,
   PROP_TIMESTAMP,
   PROP_SEQNUM,
-  PROP_REDUNDANCY
+  PROP_REDUNDANCY,
+  PROP_PTIME
 };
 
 static GstStaticPadTemplate gst_rtp_dtmf_src_template =
@@ -226,6 +227,11 @@ gst_rtp_dtmf_src_class_init (GstRTPDTMFSrcClass * klass)
           MIN_PACKET_REDUNDANCY, MAX_PACKET_REDUNDANCY,
           DEFAULT_PACKET_REDUNDANCY,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (G_OBJECT_CLASS (klass), PROP_PTIME,
+      g_param_spec_uint ("ptime", "ptime",
+          "The ptime at which to generate the dtmf packets",
+          0, G_MAXUINT, DEFAULT_PTIME,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_rtp_dtmf_src_change_state);
@@ -297,6 +303,7 @@ gst_rtp_dtmf_src_handle_dtmf_event (GstRTPDTMFSrc * dtmfsrc,
   GstClockTime last_stop;
   gint event_number;
   gint event_volume;
+  gint maxduration = 0;
   gboolean correct_order;
 
   if (!gst_structure_get_int (event_structure, "type", &event_type) ||
@@ -310,10 +317,12 @@ gst_rtp_dtmf_src_handle_dtmf_event (GstRTPDTMFSrc * dtmfsrc,
     }
   }
 
-  if (start)
+  if (start) {
     if (!gst_structure_get_int (event_structure, "number", &event_number) ||
         !gst_structure_get_int (event_structure, "volume", &event_volume))
       goto failure;
+    gst_structure_get_int (event_structure, "maxduration", &maxduration);
+  }
 
   GST_OBJECT_LOCK (dtmfsrc);
   if (gst_structure_get_clock_time (event_structure, "last-stop", &last_stop))
@@ -322,6 +331,8 @@ gst_rtp_dtmf_src_handle_dtmf_event (GstRTPDTMFSrc * dtmfsrc,
     dtmfsrc->last_stop = GST_CLOCK_TIME_NONE;
   correct_order = (start != dtmfsrc->last_event_was_start);
   dtmfsrc->last_event_was_start = start;
+  if (maxduration)
+    dtmfsrc->maxduration = maxduration;
   GST_OBJECT_UNLOCK (dtmfsrc);
 
   if (!correct_order)
@@ -332,8 +343,9 @@ gst_rtp_dtmf_src_handle_dtmf_event (GstRTPDTMFSrc * dtmfsrc,
         !gst_structure_get_int (event_structure, "volume", &event_volume))
       goto failure;
 
-    GST_DEBUG_OBJECT (dtmfsrc, "Received start event %d with volume %d",
-        event_number, event_volume);
+    GST_DEBUG_OBJECT (dtmfsrc,
+        "Received start event %d with volume %d maxduration %d", event_number,
+        event_volume, maxduration);
     gst_rtp_dtmf_src_add_start_event (dtmfsrc, event_number, event_volume);
   }
 
@@ -352,6 +364,7 @@ gst_rtp_dtmf_src_handle_custom_upstream (GstRTPDTMFSrc * dtmfsrc,
     GstEvent * event)
 {
   gboolean result = FALSE;
+  gchar *struct_str;
   const GstStructure *structure;
   GstState state;
   GstStateChangeReturn ret;
@@ -366,8 +379,54 @@ gst_rtp_dtmf_src_handle_custom_upstream (GstRTPDTMFSrc * dtmfsrc,
 
   GST_DEBUG_OBJECT (dtmfsrc, "Received event: %" GST_PTR_FORMAT, structure);
 
-  if (structure && gst_structure_has_name (structure, "dtmf-event"))
-    result = gst_rtp_dtmf_src_handle_dtmf_event (dtmfsrc, structure);
+  struct_str = gst_structure_to_string (structure);
+  GST_DEBUG_OBJECT (dtmfsrc, "Event has structure %s", struct_str);
+  g_free (struct_str);
+  if (structure && gst_structure_has_name (structure, "dtmf-event")) {
+    gint event_number = 0;
+    gint event_volume = 0;
+    gint maxduration = 0;
+    const gchar *dtmf_event_parent_name = 0;
+    GstBaseSrc *basesrc = &dtmfsrc->basesrc;
+    GstElement *element = &basesrc->element;
+    GstObject *object = &element->object;
+    const gchar *my_parent_name =
+        GST_OBJECT_NAME ((GST_OBJECT_PARENT (object)));
+
+    gst_structure_get_int (structure, "number", &event_number);
+    gst_structure_get_int (structure, "volume", &event_volume);
+    gst_structure_get_int (structure, "maxduration", &maxduration);
+    dtmf_event_parent_name = gst_structure_get_string (structure, "parentname");
+
+    if (maxduration != 0 && dtmf_event_parent_name != 0)        //ru-bu SIX-1909 special handling -> generate stop-event
+    {
+      GstStructure *structure_off = gst_structure_new ("dtmf-event",
+          "type", G_TYPE_INT, 1,
+          "number", G_TYPE_INT, (gint) event_number,
+          "volume", G_TYPE_INT, (gint) event_volume,
+          "start", G_TYPE_BOOLEAN, (gboolean) FALSE, NULL);     //aus
+
+      GST_DEBUG_OBJECT (dtmfsrc, "eventparentname %s myparentname %s",
+          dtmf_event_parent_name, my_parent_name);
+
+      /* we support my_parent_name -> "kmsrtpendpoint0" + dtmf_event_parent_name -> "kmswebrtcendpoint0" */
+      if (g_str_has_prefix (my_parent_name, "kmsrtpendpoint") && g_str_has_prefix (dtmf_event_parent_name, "kmswebrtcendpoint") /* ||
+                                                                                                                                   g_str_has_prefix(my_parent_name, "kmswebrtcendpoint") && g_str_has_prefix(dtmf_event_parent_name, "kmsrtpendpoint") */
+          ) {
+
+        result = gst_rtp_dtmf_src_handle_dtmf_event (dtmfsrc, structure);       //start event
+        if (result == FALSE) {
+          gst_structure_free (structure_off);
+          return result;
+        }
+
+        result = gst_rtp_dtmf_src_handle_dtmf_event (dtmfsrc, structure_off);   //stop event
+      }
+      gst_structure_free (structure_off);
+    } else {
+      result = gst_rtp_dtmf_src_handle_dtmf_event (dtmfsrc, structure);
+    }
+  }
 
 ret:
   return result;
@@ -420,6 +479,9 @@ gst_rtp_dtmf_src_set_property (GObject * object, guint prop_id,
     case PROP_REDUNDANCY:
       dtmfsrc->packet_redundancy = g_value_get_uint (value);
       break;
+    case PROP_PTIME:
+      dtmfsrc->ptime = g_value_get_uint (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -458,6 +520,9 @@ gst_rtp_dtmf_src_get_property (GObject * object, guint prop_id, GValue * value,
       break;
     case PROP_REDUNDANCY:
       g_value_set_uint (value, dtmfsrc->packet_redundancy);
+      break;
+    case PROP_PTIME:
+      g_value_set_uint (value, dtmfsrc->ptime);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -681,7 +746,9 @@ gst_rtp_dtmf_src_create (GstBaseSrc * basesrc, guint64 offset,
           dtmfsrc->first_packet = TRUE;
           dtmfsrc->last_packet = FALSE;
           /* Set the redundancy on the first packet */
-          dtmfsrc->redundancy_count = dtmfsrc->packet_redundancy;
+          // no redundancy on first packet SIX-1909 ru-bu
+          //dtmfsrc->redundancy_count = dtmfsrc->packet_redundancy;
+          dtmfsrc->redundancy_count = 0;
           if (!gst_rtp_dtmf_prepare_timestamps (dtmfsrc))
             goto no_clock;
 
@@ -710,8 +777,9 @@ gst_rtp_dtmf_src_create (GstBaseSrc * basesrc, guint64 offset,
 
       gst_rtp_dtmf_src_event_free (event);
     } else if (!dtmfsrc->first_packet && !dtmfsrc->last_packet &&
-        (dtmfsrc->timestamp - dtmfsrc->start_timestamp) / GST_MSECOND >=
-        MIN_PULSE_DURATION) {
+        (((dtmfsrc->timestamp - dtmfsrc->start_timestamp) / GST_MSECOND >=
+                MIN_PULSE_DURATION) || ((dtmfsrc->maxduration != 0)
+                && (dtmfsrc->payload->duration >= dtmfsrc->maxduration)))) {
       GST_DEBUG_OBJECT (dtmfsrc, "try popping");
       event = g_async_queue_try_pop (dtmfsrc->event_queue);
 

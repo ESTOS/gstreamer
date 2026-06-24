@@ -322,6 +322,11 @@ struct _RTPSession {
   /* Transport-wide cc-extension */
   RTPTWCCManager *twcc;
   RTPTWCCStats *twcc_stats;
+  
+  GstClockTime last_rx_timestamp;
+  GstClockTime last_tx_timestamp;
+  gboolean logtxrtp;
+  gboolean first_tx_packet_after_init;
 };
 
 /**

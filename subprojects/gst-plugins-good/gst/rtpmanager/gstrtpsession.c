@@ -372,6 +372,11 @@ static void gst_rtp_session_clear_pt_map (GstRtpSession * rtpsession);
 
 static GstStructure *gst_rtp_session_create_stats (GstRtpSession * rtpsession);
 
+static void dump_mem (GstPad * src, RTPSession * sess, const guchar * mem,
+    guint size, gboolean istx, gboolean isrtp);
+static void gst_gstrtpsession_dump_buffer (GstPad * src, RTPSession * sess,
+    GstBuffer * buf, gboolean istx, gboolean isrtp);
+
 static guint gst_rtp_session_signals[LAST_SIGNAL] = { 0 };
 
 static void
@@ -1490,6 +1495,7 @@ gst_rtp_session_send_rtp (RTPSession * sess, RTPSource * src,
   if (rtp_src) {
     if (GST_IS_BUFFER (data)) {
       GST_LOG_OBJECT (rtpsession, "sending RTP packet");
+      gst_gstrtpsession_dump_buffer (rtp_src, sess, data, TRUE, TRUE);
       result = gst_pad_push (rtp_src, GST_BUFFER_CAST (data));
     } else {
       GST_LOG_OBJECT (rtpsession, "sending RTP list");
@@ -1590,6 +1596,7 @@ gst_rtp_session_send_rtcp (RTPSession * sess, RTPSource * src,
       do_rtcp_events (rtpsession, rtcp_src);
 
     GST_LOG_OBJECT (rtpsession, "sending RTCP");
+    gst_gstrtpsession_dump_buffer (rtcp_src, sess, buffer, TRUE, FALSE);
     result = gst_pad_push (rtcp_src, buffer);
 
     /* Forward send an EOS on the RTCP sink if we received an EOS on the
@@ -2058,6 +2065,8 @@ gst_rtp_session_chain_recv_rtp (GstPad * pad, GstObject * parent,
   signal_waiting_rtcp_thread_unlocked (rtpsession);
   GST_RTP_SESSION_UNLOCK (rtpsession);
 
+  gst_gstrtpsession_dump_buffer (pad, priv->session, buffer, FALSE, TRUE);
+
   /* get NTP time when this packet was captured, this depends on the timestamp. */
   timestamp = GST_BUFFER_PTS (buffer);
   if (GST_CLOCK_TIME_IS_VALID (timestamp)) {
@@ -2197,6 +2206,8 @@ gst_rtp_session_chain_recv_rtcp (GstPad * pad, GstObject * parent,
   GST_RTP_SESSION_LOCK (rtpsession);
   signal_waiting_rtcp_thread_unlocked (rtpsession);
   GST_RTP_SESSION_UNLOCK (rtpsession);
+
+  gst_gstrtpsession_dump_buffer (pad, priv->session, buffer, FALSE, FALSE);
 
   current_time = gst_clock_get_time (priv->sysclock);
   get_current_times (rtpsession, &running_time, &ntpnstime);
@@ -3070,4 +3081,82 @@ gst_rtp_session_notify_early_rtcp (RTPSession * sess, gpointer user_data)
   GST_RTP_SESSION_LOCK (rtpsession);
   signal_waiting_rtcp_thread_unlocked (rtpsession);
   GST_RTP_SESSION_UNLOCK (rtpsession);
+}
+
+static void
+dump_mem (GstPad * src, RTPSession * sess, const guchar * mem, guint size,
+    gboolean istx, gboolean isrtp)
+{
+  guint i, j;
+#define ANZLOGBYTES 48
+  GString *string = g_string_sized_new ((ANZLOGBYTES * 3) + 10);
+
+  if (isrtp && size >= 12 && (mem[0] == 0x80 || mem[0] == 0x90)) {
+    guint16 seqnr = 0;
+    GstClockTime timestamp = 0;
+    GstClockTime last_timestamp;
+    guint64 ssrc = 0;
+    GstClockTime diff;
+    seqnr =
+        (((guint64) ((guchar) mem[2])) << 8) + ((guint64) ((guchar) mem[3]));
+    timestamp =
+        (((guint64) ((guchar) mem[4])) << 24) +
+        (((guint64) ((guchar) mem[5])) << 16) +
+        (((guint64) ((guchar) mem[6])) << 8) + ((guint64) ((guchar) mem[7]));
+    ssrc =
+        (((guint64) ((guchar) mem[8])) << 24) +
+        (((guint64) ((guchar) mem[9])) << 16) +
+        (((guint64) ((guchar) mem[10])) << 8) + ((guint64) ((guchar) mem[11]));
+
+    if (istx == TRUE) {
+      last_timestamp = sess->last_tx_timestamp;
+      sess->last_tx_timestamp = timestamp;
+    } else {
+      last_timestamp = sess->last_rx_timestamp;
+      sess->last_rx_timestamp = timestamp;
+    }
+
+    if (!GST_CLOCK_TIME_IS_VALID (last_timestamp))
+      last_timestamp = timestamp;
+    diff = timestamp - last_timestamp;
+
+    GST_CAT_LEVEL_LOG (GST_CAT_DEFAULT, GST_LEVEL_MEMDUMP, src,
+        "(%p) Pt:%d SeqNr:%d time:%" G_GUINT64_FORMAT " %"
+        GST_TIME_FORMAT " ssrc:%" G_GUINT64_FORMAT " tdiff:%"
+        G_GINT64_FORMAT "", mem, mem[1] & 0x7f, seqnr,
+        timestamp, GST_TIME_ARGS (timestamp), ssrc, diff);
+  }
+
+  i = j = 0;
+  while (i < size) {
+
+    g_string_append_printf (string, "%02x ", mem[i]);
+
+    j++;
+    i++;
+
+    if (j == ANZLOGBYTES || i == size) {
+      //3x48=144
+      GST_CAT_LEVEL_LOG (GST_CAT_DEFAULT, GST_LEVEL_MEMDUMP, src,
+          "(%p) %08x : %-144.144s", mem, i - j, string->str);
+      g_string_set_size (string, 0);
+      j = 0;
+    }
+  }
+  g_string_free (string, TRUE);
+}
+
+static void
+gst_gstrtpsession_dump_buffer (GstPad * src, RTPSession * sess, GstBuffer * buf,
+    gboolean istx, gboolean isrtp)
+{
+  GstMapInfo map;
+
+  if (sess->logtxrtp == FALSE)
+    return;
+
+  if (gst_buffer_map (buf, &map, GST_MAP_READ)) {
+    dump_mem (src, sess, map.data, map.size, istx, isrtp);
+    gst_buffer_unmap (buf, &map);
+  }
 }

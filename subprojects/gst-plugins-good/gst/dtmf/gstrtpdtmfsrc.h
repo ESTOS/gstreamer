@@ -99,6 +99,7 @@ struct _GstRTPDTMFSrc
 
   gboolean dirty;
   guint16 redundancy_count;
+  guint16 maxduration;
 };
 
 struct _GstRTPDTMFSrcClass

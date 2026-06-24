@@ -769,6 +769,18 @@ rtp_session_init (RTPSession * sess)
 
   sess->twcc = rtp_twcc_manager_new (sess->mtu);
   sess->twcc_stats = rtp_twcc_stats_new ();
+  
+  sess->last_rx_timestamp = 0;
+  sess->last_tx_timestamp = 0;
+  {
+    const gchar *gflags_string = g_getenv ("G_MESSAGES_DEBUG");
+    if (gflags_string && strstr (gflags_string, "rtpsessiontxrtp"))
+      sess->logtxrtp = TRUE;
+    else
+      sess->logtxrtp = FALSE;
+  }
+  //PROCALL-1130 used to set mark in the first packet ru-bu
+  sess->first_tx_packet_after_init = TRUE;
 }
 
 static void
@@ -2148,6 +2160,10 @@ update_packet (GstBuffer ** buffer, guint idx, RTPPacketInfo * pinfo)
     if (!gst_rtp_buffer_map (*buffer, GST_MAP_READ, &rtp))
       goto invalid_packet;
 
+    if (pinfo->mark == TRUE) {
+      gst_rtp_buffer_set_marker (&rtp, TRUE);
+    }
+
     pinfo->payload_len += gst_rtp_buffer_get_payload_len (&rtp);
     if (idx == 0) {
       gint i;
@@ -2218,7 +2234,8 @@ invalid_packet:
 static gboolean
 update_packet_info (RTPSession * sess, RTPPacketInfo * pinfo,
     gboolean send, gboolean rtp, gboolean is_list, gpointer data,
-    GstClockTime current_time, GstClockTime running_time, guint64 ntpnstime)
+    GstClockTime current_time, GstClockTime running_time, guint64 ntpnstime,
+    gboolean forcemark)
 {
   gboolean res;
 
@@ -2233,6 +2250,7 @@ update_packet_info (RTPSession * sess, RTPPacketInfo * pinfo,
   pinfo->bytes = 0;
   pinfo->payload_len = 0;
   pinfo->packets = 0;
+  pinfo->mark = forcemark;
   pinfo->marker = FALSE;
   pinfo->ntp64_ext_id = send ? sess->send_ntp64_ext_id : 0;
   pinfo->have_ntp64_ext = FALSE;
@@ -2359,7 +2377,7 @@ rtp_session_process_rtp (RTPSession * sess, GstBuffer * buffer,
 
   /* update pinfo stats */
   if (!update_packet_info (sess, &pinfo, FALSE, TRUE, FALSE, buffer,
-          current_time, running_time, ntpnstime)) {
+          current_time, running_time, ntpnstime, FALSE)) {
     GST_DEBUG ("invalid RTP packet received");
     RTP_SESSION_UNLOCK (sess);
     return rtp_session_process_rtcp (sess, buffer, current_time, running_time,
@@ -3157,7 +3175,7 @@ rtp_session_process_rtcp (RTPSession * sess, GstBuffer * buffer,
   RTP_SESSION_LOCK (sess);
   /* update pinfo stats */
   update_packet_info (sess, &pinfo, FALSE, FALSE, FALSE, buffer, current_time,
-      running_time, ntpnstime);
+      running_time, ntpnstime, FALSE);
 
   /* start processing the compound packet */
   gst_rtcp_buffer_map (buffer, GST_MAP_READ, &rtcp);
@@ -3469,6 +3487,7 @@ rtp_session_send_rtp (RTPSession * sess, gpointer data, gboolean is_list,
   guint64 oldrate;
   RTPPacketInfo pinfo = { 0, };
   gboolean created;
+  gboolean forcemark = FALSE;
 
   g_return_val_if_fail (RTP_IS_SESSION (sess), GST_FLOW_ERROR);
   g_return_val_if_fail (is_list || GST_IS_BUFFER (data), GST_FLOW_ERROR);
@@ -3476,8 +3495,15 @@ rtp_session_send_rtp (RTPSession * sess, gpointer data, gboolean is_list,
   GST_LOG ("received RTP %s for sending", is_list ? "list" : "packet");
 
   RTP_SESSION_LOCK (sess);
+
+  if (sess->first_tx_packet_after_init == TRUE) {
+    sess->first_tx_packet_after_init = FALSE;
+    GST_DEBUG_OBJECT (sess, "force mark on first packet");
+    forcemark = TRUE;
+  }
+
   if (!update_packet_info (sess, &pinfo, TRUE, TRUE, is_list, data,
-          current_time, running_time, ntpnstime))
+          current_time, running_time, ntpnstime, forcemark))
     goto invalid_packet;
 
   /* Update any 64-bit NTP header extensions with the actual NTP time here */

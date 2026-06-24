@@ -100,6 +100,9 @@ gst_audio_buffer_clip (GstBuffer * buffer, const GstSegment * segment,
    * they won't be changed later though. */
 
   meta = gst_buffer_get_audio_meta (buffer);
+  
+  if (!meta && !bpf)
+    return buffer;
 
   /* these variables measure samples */
   trim = 0;

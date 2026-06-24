@@ -1928,6 +1928,16 @@ gst_rtp_base_payload_prepare_push (GstRTPBasePayload * payload,
     data.offset = GST_BUFFER_OFFSET (GST_BUFFER_CAST (obj));
   }
 
+  GST_CAT_LEVEL_LOG (GST_CAT_DEFAULT, GST_LEVEL_MEMDUMP, payload,
+      "DTS: %" GST_TIME_FORMAT
+      " PTS: %" GST_TIME_FORMAT
+      " offset/boff/prtptime: %" G_GINT64_FORMAT "/%" G_GINT64_FORMAT "/%d"
+      " ts_base/base_rtime_hz: %" G_GUINT32_FORMAT "/%" G_GUINT64_FORMAT,
+      GST_TIME_ARGS (data.dts),
+      GST_TIME_ARGS (data.pts),
+      data.offset, priv->base_offset, priv->perfect_rtptime,
+      payload->ts_base, priv->base_rtime_hz);
+
   /* convert to RTP time */
   if (priv->perfect_rtptime && data.offset != GST_BUFFER_OFFSET_NONE &&
       priv->base_offset != GST_BUFFER_OFFSET_NONE) {

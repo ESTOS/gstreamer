@@ -33,7 +33,7 @@ srtp_element_init (GstPlugin * plugin)
   static gsize res = FALSE;
 
   if (g_once_init_enter (&res)) {
-    srtp_init ();
+    gst_srtp_init_library ();
     gst_type_mark_as_plugin_api (GST_TYPE_SRTP_AUTH_TYPE, 0);
     gst_type_mark_as_plugin_api (GST_TYPE_SRTP_CIPHER_TYPE, 0);
     g_once_init_leave (&res, TRUE);

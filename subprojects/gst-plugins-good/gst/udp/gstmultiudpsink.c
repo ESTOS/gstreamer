@@ -688,10 +688,17 @@ gst_multiudpsink_send_messages (GstMultiUDPSink * sink, GSocket * socket,
           sent_max_size_warning = FALSE;
         }
       } else {
+        //RTCSP-953 workaround if the destination address is the "any" address then dont print an error
+        GInetSocketAddress *isa = G_INET_SOCKET_ADDRESS (msg->address);
+        GInetAddress *ia = g_inet_socket_address_get_address (isa);
+
+        if (!g_inet_address_get_is_any (ia)) {
         GST_ELEMENT_WARNING (sink, RESOURCE, WRITE,
             ("Error sending UDP packets"), ("client %s, reason: %s",
-                gst_udp_address_get_string (msg->address, astr, sizeof (astr)),
+                  gst_udp_address_get_string (msg->address, astr,
+                      sizeof (astr)),
                 (err != NULL) ? err->message : "unknown reason"));
+        }
 
         for (i = err_idx + 1; i < num_messages; ++i, ++skip) {
           if (messages[i].address != msg->address)

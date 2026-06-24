@@ -70,6 +70,7 @@ enum
   PROP_0,
   PROP_AGENT,
   PROP_CONNECTION_STATE,
+  PROP_MTU,
   NUM_PROPERTIES
 };
 
@@ -105,6 +106,8 @@ struct _GstDtlsConnectionPrivate
 
   gboolean timeout_pending;
   GThreadPool *thread_pool;
+
+  unsigned int mtu;
 };
 
 G_DEFINE_TYPE_WITH_CODE (GstDtlsConnection, gst_dtls_connection,
@@ -173,6 +176,12 @@ gst_dtls_connection_class_init (GstDtlsConnectionClass * klass)
       "Current connection state",
       GST_DTLS_TYPE_CONNECTION_STATE,
       GST_DTLS_CONNECTION_STATE_NEW, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+      
+  properties[PROP_MTU] =
+      g_param_spec_uint ("mtu",
+      "mtu",
+      "set the mtu for this connection",
+      0, G_MAXUINT, 0, G_PARAM_WRITABLE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, NUM_PROPERTIES, properties);
 
@@ -208,6 +217,8 @@ gst_dtls_connection_init (GstDtlsConnection * self)
   priv->thread_pool = g_thread_pool_new (handle_timeout, self, 1, FALSE, NULL);
   g_assert (priv->thread_pool);
   priv->timeout_pending = FALSE;
+
+  priv->mtu = 1500;
 }
 
 static void
@@ -297,6 +308,9 @@ gst_dtls_connection_set_property (GObject * object, guint prop_id,
       SSL_set_ex_data (priv->ssl, connection_ex_index, self);
 
       log_state (self, "connection created");
+      break;
+    case PROP_MTU:
+      priv->mtu = g_value_get_uint (value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (self, prop_id, pspec);
@@ -1285,10 +1299,16 @@ bio_method_ctrl (BIO * bio, int cmd, long arg1, void *arg2)
       GST_LOG_OBJECT (self, "BIO: flushing");
       return 1;
     case BIO_CTRL_DGRAM_QUERY_MTU:
-      GST_DEBUG_OBJECT (self, "BIO: MTU query, returning 1200...");
-      return 1200;
+      GST_DEBUG_OBJECT (self, "BIO: MTU query, returning %d...", priv->mtu);
+      return priv->mtu;
     case BIO_CTRL_DGRAM_MTU_EXCEEDED:
       GST_WARNING_OBJECT (self, "BIO: MTU exceeded");
+      return 0;
+    case BIO_CTRL_DGRAM_SET_MTU:
+      GST_LOG_OBJECT (self, "BIO: SET MTU");
+      return 0;
+    case BIO_CTRL_DGRAM_GET_MTU_OVERHEAD:
+      GST_DEBUG_OBJECT (self, "BIO: MTU OVERHEAD query, returning 0...");
       return 0;
     default:
       GST_LOG_OBJECT (self, "BIO: unhandled ctrl, %d", cmd);

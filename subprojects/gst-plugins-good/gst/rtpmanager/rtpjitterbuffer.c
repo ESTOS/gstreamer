@@ -162,6 +162,7 @@ void
 rtp_jitter_buffer_set_mode (RTPJitterBuffer * jbuf, RTPJitterBufferMode mode)
 {
   jbuf->mode = mode;
+  GST_DEBUG ("mode %d ", (gint) mode);
 }
 
 GstClockTime
@@ -603,6 +604,12 @@ calculate_skew (RTPJitterBuffer * jbuf, guint64 ext_rtptime,
   /* elapsed time at sender */
   send_diff = gstrtptime - jbuf->base_rtptime;
 
+  GST_DEBUG ("rtptime %" GST_TIME_FORMAT ", rtpbase %" GST_TIME_FORMAT
+      ", send_diff %" GST_TIME_FORMAT ",time %" GST_TIME_FORMAT ", base %"
+      GST_TIME_FORMAT, GST_TIME_ARGS (gstrtptime),
+      GST_TIME_ARGS (jbuf->base_rtptime), GST_TIME_ARGS (send_diff),
+      GST_TIME_ARGS (time), GST_TIME_ARGS (jbuf->base_time));
+
   /* we don't have an arrival timestamp so we can't do skew detection. we
    * should still apply a timestamp based on RTP timestamp and base_time */
   if (time == -1 || jbuf->base_time == -1 || is_rtx)
@@ -842,6 +849,10 @@ rtp_jitter_buffer_calculate_pts (RTPJitterBuffer * jbuf, GstClockTime dts,
 
   switch (jbuf->mode) {
     case RTP_JITTER_BUFFER_MODE_NONE:
+      /* PROCALL-1129 was RTCSP-1871 should not be set to 0 for the first timestamp - better start with rtptime */
+      if (jbuf->base_time != -1)
+        dts = -1;
+      break;
     case RTP_JITTER_BUFFER_MODE_BUFFER:
       /* send 0 as the first timestamp and -1 for the other ones. This will
        * interpolate them from the RTP timestamps with a 0 origin. In buffering
