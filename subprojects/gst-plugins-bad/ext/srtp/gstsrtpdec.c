@@ -1387,7 +1387,6 @@ unprotect:
     case srtp_err_status_auth_fail:
       //(30days*24h*60min)/20min per ro = 2160
       if (roc_try_counter++ < 2160) {
-        GST_OBJECT_LOCK (filter);
         GST_WARNING_OBJECT (filter, "ROC:%d", roc_try_counter);
         srtp_set_stream_roc (filter->session, ssrc, roc_try_counter);
         goto unprotect;

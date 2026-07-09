@@ -218,7 +218,7 @@ gst_dtls_connection_init (GstDtlsConnection * self)
   g_assert (priv->thread_pool);
   priv->timeout_pending = FALSE;
 
-  priv->mtu = 1500;
+  priv->mtu = 1200;
 }
 
 static void

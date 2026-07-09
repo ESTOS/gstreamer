@@ -658,22 +658,23 @@ gst_pipeline_handle_message (GstBin * bin, GstMessage * message)
     {
       //ru-bu SIX-1909
       const GstStructure *s = gst_message_get_structure (message);
-      const gchar *name = gst_structure_get_name (s);
-      if (g_str_equal (name, "dtmf-event")) {
+      if (s && gst_structure_has_name (s, "dtmf-event")) {
         GstStructure *structure;
         GstEvent *event;
         gint maxduration = 800;
         gint event_number;
         gint event_volume;
-        gint event_type;
-        gint method;
-        const gchar *parent_name =
-            GST_OBJECT_NAME ((GST_OBJECT_PARENT (message->src)));
+        //gint event_type;
+        //gint method;
+        GstObject *parent = message->src ? GST_OBJECT_PARENT (message->src) : NULL;
+        const gchar *parent_name = parent ? GST_OBJECT_NAME (parent) : NULL;
+        if (!parent_name || !parent_name[0])
+            break;
 
         gst_structure_get_int (s, "number", &event_number);
         gst_structure_get_int (s, "volume", &event_volume);
-        gst_structure_get_int (s, "type", &event_type);
-        gst_structure_get_int (s, "method", &method);
+        //gst_structure_get_int (s, "type", &event_type);
+        //gst_structure_get_int (s, "method", &method);
 
         GST_DEBUG_OBJECT (bin, "Sending DTMF-EVENT Number %d", event_number);
 
@@ -687,6 +688,7 @@ gst_pipeline_handle_message (GstBin * bin, GstMessage * message)
           /* fine */
         } else {
           /* not fine */
+          gst_event_unref (event);
         }
       }
       break;
