@@ -29,7 +29,6 @@ prefix/
 /gst-plugins-rs
 
 # Automatic meson redirect wrap files
-subprojects/abseil-cpp.wrap
 subprojects/gi-docgen.wrap
 subprojects/gobject-introspection-tests.wrap
 subprojects/gperf.wrap

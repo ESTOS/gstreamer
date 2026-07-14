@@ -19,7 +19,29 @@ if not cdata.has('HAVE_GETTIMEOFDAY')
   libcheck_files += ['libcompat/gettimeofday.c']
 endif
 
-if not cdata.has('HAVE_CLOCK_GETTIME')
+libcheck_extra_c_args = []
+libcheck_deps = [rt_lib, mathlib, glib_dep]
+libcheck_private_deps = []
+
+# On MSYS2/MinGW, clock_gettime() is a static inline in pthread_time.h
+# (included from time.h), so cc.has_function() fails and libcheck would
+# otherwise build its own clock_gettime.c, which conflicts with the header.
+# Teach libcheck about the system function locally without enabling
+# HAVE_CLOCK_GETTIME globally (GStreamer core uses Win32 APIs on Windows).
+have_clock_gettime = cdata.has('HAVE_CLOCK_GETTIME')
+if not have_clock_gettime and cc.has_header_symbol('time.h', 'clock_gettime')
+  have_clock_gettime = true
+  libcheck_extra_c_args += ['-DHAVE_CLOCK_GETTIME=1']
+  if host_system == 'windows'
+    pthread_lib = cc.find_library('pthread', required : false)
+    if pthread_lib.found()
+      libcheck_deps += pthread_lib
+      libcheck_private_deps += pthread_lib
+    endif
+  endif
+endif
+
+if not have_clock_gettime
   libcheck_files += ['libcompat/clock_gettime.c']
 endif
 
@@ -81,8 +103,8 @@ endforeach
 libcheck = static_library('check',
   libcheck_files,
   include_directories : [configinc, internal_check_h_inc],
-  dependencies : [rt_lib, mathlib, glib_dep],
-  c_args: gst_c_args + libcheck_visibility_args + no_warn_args +
+  dependencies : libcheck_deps,
+  c_args: gst_c_args + libcheck_visibility_args + no_warn_args + libcheck_extra_c_args +
 	  # Don't want libcompat to think we don't have these and substitute
 	  # replacements since we don't check for or define these. See libcompat.h
 	  ['-DHAVE_VSNPRINTF', '-DHAVE_SNPRINTF', '-DHAVE_MALLOC', '-DHAVE_REALLOC'],

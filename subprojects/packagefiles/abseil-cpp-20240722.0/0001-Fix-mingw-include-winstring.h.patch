@@ -1,0 +1,27 @@
+From 8bdbd840e97ff32e17f25db85c82589819ad3352 Mon Sep 17 00:00:00 2001
+From: Biswa96 <biswa@live.com>
+Subject: [PATCH] Fix mingw compiler error due to missing function declaration
+
+MinGW declares WindowsCreateStringReference, WindowsDeleteString, and
+WindowsGetStringRawBuffer in winstring.h. Include it when building the
+WinRT local time zone path.
+
+Upstream-Status: Submitted [https://github.com/google/cctz/pull/297]
+---
+ absl/time/internal/cctz/src/time_zone_lookup.cc | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/absl/time/internal/cctz/src/time_zone_lookup.cc b/absl/time/internal/cctz/src/time_zone_lookup.cc
+index 1111111..2222222 100644
+--- a/absl/time/internal/cctz/src/time_zone_lookup.cc
++++ b/absl/time/internal/cctz/src/time_zone_lookup.cc
+@@ -46,6 +46,7 @@
+ #include <wchar.h>
+ #include <windows.globalization.h>
+ #include <windows.h>
++#include <winstring.h>
+ #endif
+ #endif
+ 
+-- 
+2.47.1

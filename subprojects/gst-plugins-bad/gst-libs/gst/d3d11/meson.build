@@ -98,6 +98,15 @@ if runtimeobject_lib.found() and d3dcompiler_lib.found()
       #endif''',
       dependencies: [d3d11_lib, dxgi_lib, runtimeobject_lib],
       name: 'building for WinRT')
+  if d3d11_winapi_app
+    d3d11_winapi_app = cxx.compiles('''#include <windows.ui.xaml.h>
+      #include <windows.ui.xaml.media.dxinterop.h>
+      #include <windows.applicationmodel.core.h>
+      #include <wrl.h>
+      int main() { return 0; }''',
+      dependencies: [runtimeobject_lib],
+      name: 'Windows XAML D3D interop headers')
+  endif
 endif
 
 if not d3d11_winapi_desktop and not d3d11_winapi_app

@@ -55,7 +55,7 @@ gst_check = library('gstcheck-@0@'.format(api_version),
   install : true,
   include_directories : [configinc, libsinc],
   link_with : [libcheck],
-  dependencies : [gst_dep],
+  dependencies : [gst_dep] + libcheck_private_deps,
 )
 
 library_def = {'lib': gst_check}
@@ -65,7 +65,7 @@ pkgconfig.generate(gst_check,
   # FIXME: Add manually libcheck's dependencies because it's an uninstalled static
   # library and Meson <0.56.0 does not handle them correctly.
   # See https://github.com/mesonbuild/meson/pull/7488.
-  libraries_private: [rt_lib, mathlib],
+  libraries_private: [rt_lib, mathlib] + libcheck_private_deps,
   variables : pkgconfig_variables,
   subdirs : pkgconfig_subdirs,
   name : pkg_name,
